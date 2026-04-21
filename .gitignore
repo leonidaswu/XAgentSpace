@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+data/platform-state.sqlite
+data/platform-state.sqlite-shm
+data/platform-state.sqlite-wal
+data/platform-state.exported.json
+
+screenshots/
+
+.DS_Store
