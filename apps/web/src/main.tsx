@@ -103,6 +103,7 @@ type HumanAccount = {
   username: string;
   displayName: string;
   bio: string;
+  role: 'member' | 'moderator' | 'admin';
   lifecycleState: 'active' | 'suspended';
   createdAt: string;
 };
@@ -266,9 +267,20 @@ type ForumPageInfo = {
   nextCursor?: string;
 };
 
-type HumanAccountRegistrationResult = {
+type HumanAuthSessionResult = {
   account: HumanAccount;
-  issuedAuthToken: string;
+  sessionExpiresAt: string;
+};
+
+type ModerationAuditLog = {
+  id: string;
+  scope: 'forum_report';
+  action: 'status_changed';
+  targetId: string;
+  actor: ForumAuthorRef;
+  summary: string;
+  createdAt: string;
+  metadata: Record<string, string>;
 };
 
 type AgentAccountRegistrationResult = {
@@ -305,6 +317,19 @@ type StageCue = {
   highlightCharge: boolean;
 };
 
+function createClientNonce() {
+  const webCrypto = globalThis.crypto;
+  if (typeof webCrypto?.randomUUID === 'function') {
+    return webCrypto.randomUUID().slice(0, 8);
+  }
+  if (typeof webCrypto?.getRandomValues === 'function') {
+    const bytes = new Uint8Array(4);
+    webCrypto.getRandomValues(bytes);
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  }
+  return Math.random().toString(16).slice(2, 10).padEnd(8, '0');
+}
+
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has('Content-Type')) {
@@ -313,6 +338,7 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
 
   const response = await fetch(input, {
     ...init,
+    credentials: init?.credentials ?? 'same-origin',
     headers
   });
 
@@ -562,6 +588,27 @@ function useForumHome() {
   return { data, error, refresh };
 }
 
+function useHotForumTags(limit: number) {
+  const [data, setData] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    try {
+      const result = await request<{ tags: string[] }>(`/api/forums/tags/hot?limit=${limit}`);
+      setData(result.tags);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, [limit]);
+
+  return { data, error, refresh };
+}
+
 function useForumReports(status: ForumReport['status'] | 'all', boardId: ForumBoardId | null) {
   const [data, setData] = useState<ForumReport[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -584,6 +631,32 @@ function useForumReports(status: ForumReport['status'] | 'all', boardId: ForumBo
   useEffect(() => {
     void refresh();
   }, [boardId, status]);
+
+  return { data, error, refresh };
+}
+
+function useModerationAuditLogs(enabled: boolean) {
+  const [data, setData] = useState<ModerationAuditLog[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    if (!enabled) {
+      setData([]);
+      return;
+    }
+
+    try {
+      const result = await request<{ audits: ModerationAuditLog[] }>('/api/forums/moderation/audits?limit=20');
+      setData(result.audits);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, [enabled]);
 
   return { data, error, refresh };
 }
@@ -661,20 +734,40 @@ function useHumanAccounts() {
   return { data, error, refresh };
 }
 
-function useHumanNotifications(humanId: string | null, token: string | null) {
+function useCurrentHumanSession() {
+  const [data, setData] = useState<HumanAccount | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refresh() {
+    try {
+      const result = await request<{ account: HumanAccount }>('/api/platform/humans/session');
+      setData(result.account);
+      setError(null);
+    } catch (err) {
+      setData(null);
+      setError((err as Error).message);
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  return { data, error, refresh, setData };
+}
+
+function useHumanNotifications(humanId: string | null) {
   const [data, setData] = useState<HumanNotification[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
-    if (!humanId || !token) {
+    if (!humanId) {
       setData([]);
       return;
     }
 
     try {
-      const result = await request<{ notifications: HumanNotification[] }>(`/api/platform/humans/${humanId}/notifications`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const result = await request<{ notifications: HumanNotification[] }>(`/api/platform/humans/${humanId}/notifications`);
       setData(result.notifications);
       setError(null);
     } catch (err) {
@@ -684,7 +777,7 @@ function useHumanNotifications(humanId: string | null, token: string | null) {
 
   useEffect(() => {
     void refresh();
-  }, [humanId, token]);
+  }, [humanId]);
 
   return { data, error, refresh, setData };
 }
@@ -1338,24 +1431,9 @@ const navItems: NavItem[] = [
   }
 ];
 
-const humanTokenStorageKey = 'xagentspace.humanAuthTokens';
-const currentHumanStorageKey = 'xagentspace.currentHumanAccountId';
 const forumBoardPageLimit = 10;
 const forumThreadPostPageLimit = 10;
 const forumHomeBoardLimit = 4;
-
-function readStoredHumanAuthTokens() {
-  try {
-    const stored = window.localStorage.getItem(humanTokenStorageKey);
-    if (!stored) {
-      return {};
-    }
-    const parsed = JSON.parse(stored) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
-  } catch {
-    return {};
-  }
-}
 
 function parseRoute(pathname: string): Route {
   if (pathname === '/') {
@@ -1440,9 +1518,16 @@ function parseRoute(pathname: string): Route {
 function App() {
   const { data: gamesData, error: gamesError, refresh: refreshGames } = useGames();
   const { data: humanAccounts, error: humansError, refresh: refreshHumans } = useHumanAccounts();
+  const {
+    data: currentHumanAccount,
+    error: humanSessionError,
+    refresh: refreshCurrentHumanSession,
+    setData: setCurrentHumanAccount
+  } = useCurrentHumanSession();
   const { data: agentAccounts, error: agentAccountsError, refresh: refreshAgentAccounts } = useAgentAccounts();
   const { data: agentContract, error: agentContractError, refresh: refreshAgentContract } = useAgentIntegrationContract();
   const { data: forumHomeData, error: forumHomeError, refresh: refreshForumHome } = useForumHome();
+  const { data: hotForumTagsData, error: hotForumTagsError, refresh: refreshHotForumTags } = useHotForumTags(8);
   const {
     data: homeAnnouncementsData,
     error: homeAnnouncementsError,
@@ -1463,7 +1548,7 @@ function App() {
   const [selectedAgentId, setSelectedAgentId] = useState('');
   const [trashTalk, setTrashTalk] = useState('下一局你会开始怀疑概率论。');
   const [selectedMove, setSelectedMove] = useState('rock');
-  const [nonce, setNonce] = useState(() => crypto.randomUUID().slice(0, 8));
+  const [nonce, setNonce] = useState(() => createClientNonce());
   const [status, setStatus] = useState<string | null>(null);
   const [replayMode, setReplayMode] = useState(false);
   const [replayIndex, setReplayIndex] = useState(0);
@@ -1472,7 +1557,6 @@ function App() {
   const [cueStartedAt, setCueStartedAt] = useState(() => performance.now());
   const [cueNow, setCueNow] = useState(() => performance.now());
   const [humanAuthMode, setHumanAuthMode] = useState<'login' | 'register'>('register');
-  const [currentHumanAccountId, setCurrentHumanAccountId] = useState(() => window.localStorage.getItem(currentHumanStorageKey) ?? '');
   const [humanLoginUsername, setHumanLoginUsername] = useState('');
   const [humanLoginPassword, setHumanLoginPassword] = useState('');
   const [humanUsername, setHumanUsername] = useState('');
@@ -1480,13 +1564,17 @@ function App() {
   const [humanPassword, setHumanPassword] = useState('');
   const [humanPasswordConfirm, setHumanPasswordConfirm] = useState('');
   const [humanBio, setHumanBio] = useState('');
-  const [lastIssuedHumanAuthToken, setLastIssuedHumanAuthToken] = useState<string | null>(null);
+  const [accountProfileDisplayName, setAccountProfileDisplayName] = useState('');
+  const [accountProfileBio, setAccountProfileBio] = useState('');
+  const [accountProfileCurrentPassword, setAccountProfileCurrentPassword] = useState('');
+  const [accountProfileNextPassword, setAccountProfileNextPassword] = useState('');
+  const [accountProfileNextPasswordConfirm, setAccountProfileNextPasswordConfirm] = useState('');
+  const [accountProfileStatus, setAccountProfileStatus] = useState<string | null>(null);
   const [agentHandle, setAgentHandle] = useState('arena_bot');
   const [agentDisplayName, setAgentDisplayName] = useState('竞技场 Bot');
   const [agentBio, setAgentBio] = useState('通过 WebSocket 接收事件，并参与后续多游戏模块。');
   const [agentAccessMode, setAgentAccessMode] = useState<AgentAccount['accessMode']>('websocket');
   const [agentAuthTokens, setAgentAuthTokens] = useState<Record<string, string>>({});
-  const [humanAuthTokens, setHumanAuthTokens] = useState<Record<string, string>>(() => readStoredHumanAuthTokens());
   const [forumSearch, setForumSearch] = useState('');
   const [forumTagFilter, setForumTagFilter] = useState('');
   const [forumAuthorFilter, setForumAuthorFilter] = useState<'all' | 'human' | 'agent'>('all');
@@ -1532,6 +1620,9 @@ function App() {
   const { data: forumBoardData, error: forumBoardError, refresh: refreshForumBoard, loadMore: loadMoreForumBoard } = useForumBoard(activeForumId, forumFilters);
   const { data: forumThreadData, error: forumThreadError, refresh: refreshForumThread, loadMore: loadMoreForumThread } = useForumThread(activeThreadId, threadCommentSort);
   const { data: forumReports, error: forumReportsError, refresh: refreshForumReports } = useForumReports(forumReportStatus, activeForumId);
+  const { data: moderationAuditLogs, error: moderationAuditLogsError, refresh: refreshModerationAuditLogs } = useModerationAuditLogs(
+    currentHumanAccount?.role === 'admin' || currentHumanAccount?.role === 'moderator'
+  );
   const {
     data: announcementDetail,
     error: announcementDetailError,
@@ -1547,20 +1638,25 @@ function App() {
     matches[0] ??
     null;
   const liveEvents = useSpectatorFeed(route.name === 'game-match' ? route.gameId : activeGameId, route.name === 'game-match' ? selectedMatch?.id ?? null : null);
-  const currentHumanAccount =
-    humanAccounts.find((account) => account.id === currentHumanAccountId && account.lifecycleState === 'active' && Boolean(humanAuthTokens[account.id])) ??
-    humanAccounts.find((account) => account.lifecycleState === 'active' && Boolean(humanAuthTokens[account.id])) ??
-    null;
-  const currentHumanToken = currentHumanAccount ? humanAuthTokens[currentHumanAccount.id] ?? null : null;
   const {
     data: humanNotifications,
     error: humanNotificationsError,
     refresh: refreshHumanNotifications,
     setData: setHumanNotifications
-  } = useHumanNotifications(currentHumanAccount?.id ?? null, currentHumanToken);
+  } = useHumanNotifications(currentHumanAccount?.id ?? null);
   const unreadNotificationCount = humanNotifications.filter((notification) => !notification.readAt).length;
   const isHumanLoggedIn = Boolean(currentHumanAccount);
-  const isAnnouncementModerator = currentHumanAccount?.username === 'arena_admin';
+  const canModerateForum = currentHumanAccount?.role === 'admin' || currentHumanAccount?.role === 'moderator';
+  const isAnnouncementModerator = currentHumanAccount?.role === 'admin';
+
+  useEffect(() => {
+    setAccountProfileDisplayName(currentHumanAccount?.displayName ?? '');
+    setAccountProfileBio(currentHumanAccount?.bio ?? '');
+    setAccountProfileCurrentPassword('');
+    setAccountProfileNextPassword('');
+    setAccountProfileNextPasswordConfirm('');
+    setAccountProfileStatus(null);
+  }, [currentHumanAccount?.bio, currentHumanAccount?.displayName, currentHumanAccount?.id]);
 
   function canManageAnnouncement(item: Announcement) {
     if (!currentHumanAccount) {
@@ -1585,17 +1681,6 @@ function App() {
     const token = agentAuthTokens[agentId];
     if (!token) {
       throw new Error('当前控制的 Agent 没有可用 token，请重新注册或重新从大厅创建。');
-    }
-
-    return {
-      Authorization: `Bearer ${token}`
-    };
-  }
-
-  function getHumanAuthHeaders(humanId: string) {
-    const token = humanAuthTokens[humanId] ?? (humanAccounts.length === 1 ? lastIssuedHumanAuthToken : null);
-    if (!token) {
-      throw new Error('当前人类账户没有可用 token，请先在本页注册或重新注册。');
     }
 
     return {
@@ -1631,6 +1716,7 @@ function App() {
       refreshGameState(),
       refreshGameLobby(),
       refreshHumans(),
+      refreshCurrentHumanSession(),
       refreshAgentAccounts(),
       refreshAgentContract(),
       refreshForumHome(),
@@ -1640,6 +1726,7 @@ function App() {
       refreshForumBoard(),
       refreshForumThread(),
       refreshForumReports(),
+      refreshModerationAuditLogs(),
       refreshHumanNotifications()
     ]);
   }
@@ -1649,43 +1736,6 @@ function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(humanTokenStorageKey, JSON.stringify(humanAuthTokens));
-  }, [humanAuthTokens]);
-
-  useEffect(() => {
-    if (currentHumanAccountId) {
-      window.localStorage.setItem(currentHumanStorageKey, currentHumanAccountId);
-      return;
-    }
-    window.localStorage.removeItem(currentHumanStorageKey);
-  }, [currentHumanAccountId]);
-
-  useEffect(() => {
-    if (!currentHumanAccount) {
-      return;
-    }
-
-    const token = humanAuthTokens[currentHumanAccount.id];
-    if (!token) {
-      return;
-    }
-
-    let cancelled = false;
-    void request<{ account: HumanAccount }>(`/api/platform/humans/${currentHumanAccount.id}/session`, {
-      headers: { Authorization: `Bearer ${token}` }
-    }).catch((err) => {
-      if (cancelled) {
-        return;
-      }
-      clearHumanSession(currentHumanAccount.id, `登录已过期，请重新登录。${(err as Error).message ? `（${(err as Error).message}）` : ''}`);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [currentHumanAccount?.id, humanAuthTokens]);
 
   useEffect(() => {
     setReplayMode(false);
@@ -1875,6 +1925,11 @@ function App() {
     active: '启用',
     suspended: '已暂停'
   };
+  const humanRoleLabels: Record<HumanAccount['role'], string> = {
+    member: '普通成员',
+    moderator: '版主',
+    admin: '管理员'
+  };
   const agentLifecycleLabels: Record<AgentAccount['lifecycleState'], string> = {
     active: '启用',
     revoked: '已撤销'
@@ -1934,22 +1989,9 @@ function App() {
       .slice(0, 5);
   }, [forumHomeData]);
   const hotForumTags = useMemo(() => {
-    const counts = new Map<string, number>();
-    forumHomeData.forEach((snapshot) => {
-      snapshot.threads.forEach((thread) => {
-        thread.tags.forEach((tag) => {
-          counts.set(tag, (counts.get(tag) ?? 0) + Math.max(1, thread.postCount));
-        });
-      });
-    });
-
-    const tags = Array.from(counts.entries())
-      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-      .slice(0, 8)
-      .map(([tag]) => `#${formatForumTag(tag)}`);
-
+    const tags = hotForumTagsData.map((tag) => `#${formatForumTag(tag)}`);
     return tags.length > 0 ? tags : ['#策略', '#RPS', '#分析', '#规划'];
-  }, [forumHomeData]);
+  }, [hotForumTagsData]);
   const forumHomeStats = useMemo(() => {
     return forumHomeData.reduce(
       (totals, snapshot) => ({
@@ -2086,7 +2128,7 @@ function App() {
     }
 
     try {
-      const result = await request<HumanAccountRegistrationResult>('/api/platform/humans', {
+      const result = await request<HumanAuthSessionResult>('/api/platform/humans', {
         method: 'POST',
         body: JSON.stringify({
           username: humanUsername,
@@ -2104,7 +2146,7 @@ function App() {
   async function loginHumanAccount() {
     setStatus(null);
     try {
-      const result = await request<HumanAccountRegistrationResult>('/api/platform/humans/login', {
+      const result = await request<HumanAuthSessionResult>('/api/platform/humans/login', {
         method: 'POST',
         body: JSON.stringify({
           username: humanLoginUsername,
@@ -2117,37 +2159,64 @@ function App() {
     }
   }
 
-  async function completeHumanSession(result: HumanAccountRegistrationResult, message: string) {
-    setLastIssuedHumanAuthToken(result.issuedAuthToken);
-    setCurrentHumanAccountId(result.account.id);
-    setHumanAuthTokens((current) => ({
-      ...current,
-      [result.account.id]: result.issuedAuthToken
-    }));
-    await refreshHumans();
+  async function completeHumanSession(result: HumanAuthSessionResult, message: string) {
+    setCurrentHumanAccount(result.account);
+    await Promise.all([refreshHumans(), refreshCurrentHumanSession(), refreshHumanNotifications()]);
     setStatus(message);
     navigate('/');
   }
 
-  function clearHumanSession(humanId: string, message: string) {
-    setHumanAuthTokens((current) => {
-      const next = { ...current };
-      delete next[humanId];
-      return next;
-    });
-    setCurrentHumanAccountId((current) => (current === humanId ? '' : current));
-    setLastIssuedHumanAuthToken(null);
+  function clearHumanSession(message: string) {
+    setCurrentHumanAccount(null);
+    setHumanNotifications([]);
     setStatus(message);
   }
 
-  function logoutHumanAccount() {
+  async function logoutHumanAccount() {
     if (!currentHumanAccount) {
       navigate('/register/human');
       return;
     }
 
-    clearHumanSession(currentHumanAccount.id, '已退出人类账户。');
+    await request('/api/platform/humans/logout', {
+      method: 'POST'
+    }).catch(() => undefined);
+    clearHumanSession('已退出人类账户。');
     navigate('/register/human');
+  }
+
+  async function saveHumanProfile() {
+    if (!currentHumanAccount) {
+      return;
+    }
+
+    setAccountProfileStatus(null);
+    if (accountProfileNextPassword && accountProfileNextPassword !== accountProfileNextPasswordConfirm) {
+      setAccountProfileStatus('两次输入的新密码不一致。');
+      return;
+    }
+
+    try {
+      const result = await request<{ account: HumanAccount }>(`/api/platform/humans/${currentHumanAccount.id}/profile`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          displayName: accountProfileDisplayName,
+          bio: accountProfileBio,
+          currentPassword: accountProfileCurrentPassword || undefined,
+          nextPassword: accountProfileNextPassword || undefined
+        })
+      });
+      setCurrentHumanAccount(result.account);
+      await Promise.all([refreshHumans(), refreshCurrentHumanSession()]);
+      setAccountProfileCurrentPassword('');
+      setAccountProfileNextPassword('');
+      setAccountProfileNextPasswordConfirm('');
+      setAccountProfileDisplayName(result.account.displayName);
+      setAccountProfileBio(result.account.bio);
+      setAccountProfileStatus('账户资料已更新。');
+    } catch (err) {
+      setAccountProfileStatus((err as Error).message);
+    }
   }
 
   async function registerAgentAccount() {
@@ -2178,11 +2247,12 @@ function App() {
     const message = (err as Error).message;
     if (
       currentHumanAccount &&
-      (message.includes('Invalid human auth token') ||
+      (message.includes('Human session') ||
+        message.includes('No active human session') ||
         message.includes('Human account is not active') ||
         message.includes('Unknown human account'))
     ) {
-      clearHumanSession(currentHumanAccount.id, `登录已过期，请重新登录。${message ? `（${message}）` : ''}`);
+      clearHumanSession(`登录已过期，请重新登录。${message ? `（${message}）` : ''}`);
       return;
     }
 
@@ -2277,7 +2347,7 @@ function App() {
         body: JSON.stringify({ agentId: selectedAgentId, move: selectedMove, nonce })
       });
       await refreshPlatformData();
-      setNonce(crypto.randomUUID().slice(0, 8));
+      setNonce(createClientNonce());
       setStatus('出拳已揭示。');
     } catch (err) {
       handleHumanActionError(err);
@@ -2294,7 +2364,6 @@ function App() {
     try {
       const created = await request<{ thread: ForumThread; post: ForumPost }>(`/api/forums/${activeForumId}/threads`, {
         method: 'POST',
-        headers: getHumanAuthHeaders(authorId),
         body: JSON.stringify({
           title: forumThreadTitle,
           body: forumThreadBody,
@@ -2319,7 +2388,6 @@ function App() {
     try {
       await request(`/api/forums/threads/${threadId}/posts`, {
         method: 'POST',
-        headers: getHumanAuthHeaders(authorId),
         body: JSON.stringify({
           body,
           authorKind: 'human',
@@ -2348,8 +2416,7 @@ function App() {
     setStatus(null);
     try {
       const result = await request<{ notifications: HumanNotification[] }>(`/api/platform/humans/${currentHumanAccount.id}/notifications/read`, {
-        method: 'POST',
-        headers: getHumanAuthHeaders(currentHumanAccount.id)
+        method: 'POST'
       });
       setHumanNotifications(result.notifications);
       setStatus('通知已标记为已读。');
@@ -2364,7 +2431,6 @@ function App() {
     try {
       await request(`/api/forums/posts/${postId}/reactions`, {
         method: 'POST',
-        headers: getHumanAuthHeaders(actorId),
         body: JSON.stringify({
           actorKind: 'human',
           actorId,
@@ -2384,7 +2450,6 @@ function App() {
     try {
       await request(`/api/forums/posts/${postId}/report`, {
         method: 'POST',
-        headers: getHumanAuthHeaders(authorId),
         body: JSON.stringify({
           reporterKind: 'human',
           reporterId: authorId,
@@ -2405,7 +2470,6 @@ function App() {
     try {
       await request(`/api/forums/reports/${reportId}/moderation`, {
         method: 'POST',
-        headers: getHumanAuthHeaders(moderatorId),
         body: JSON.stringify({
           status: nextStatus,
           moderatorKind: 'human',
@@ -2431,7 +2495,6 @@ function App() {
       if (announcementEditingId) {
         const updated = await request<Announcement>(`/api/announcements/${announcementEditingId}`, {
           method: 'PATCH',
-          headers: getHumanAuthHeaders(currentHumanAccount.id),
           body: JSON.stringify({
             title: announcementTitle,
             summary: announcementSummary,
@@ -2449,7 +2512,6 @@ function App() {
 
       const created = await request<Announcement>('/api/announcements', {
         method: 'POST',
-        headers: getHumanAuthHeaders(currentHumanAccount.id),
         body: JSON.stringify({
           title: announcementTitle,
           summary: announcementSummary,
@@ -2479,7 +2541,6 @@ function App() {
     try {
       await request<Announcement>(`/api/announcements/${item.id}`, {
         method: 'PATCH',
-        headers: getHumanAuthHeaders(currentHumanAccount.id),
         body: JSON.stringify({
           isPinned: patch.isPinned,
           status: patch.status,
@@ -3332,7 +3393,7 @@ function App() {
                     value={humanLoginUsername}
                     onChange={(event) => setHumanLoginUsername(event.target.value)}
                     autoComplete="username"
-                    placeholder="arena_admin"
+                    placeholder="your_username"
                   />
                 </label>
                 <label className="field">
@@ -3467,11 +3528,87 @@ function App() {
                 <dd>默认使用当前账户</dd>
               </div>
               <div>
+                <dt>权限角色</dt>
+                <dd>{humanRoleLabels[currentHumanAccount.role]}</dd>
+              </div>
+              <div>
                 <dt>本地凭据</dt>
-                <dd>{humanAuthTokens[currentHumanAccount.id] ? '已保存到本浏览器' : '未保存'}</dd>
+                <dd>HttpOnly Session Cookie</dd>
               </div>
             </dl>
           </aside>
+        </section>
+        <section className="panel stack account-profile-editor">
+          <div className="section-head compact">
+            <div>
+              <h2>编辑当前身份</h2>
+              <p>{accountProfileStatus ?? '你可以更新显示名、简介，并按需修改密码。'}</p>
+            </div>
+          </div>
+          <form
+            className="stack"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveHumanProfile();
+            }}
+          >
+            <div className="dual-fields">
+              <label className="field">
+                显示名
+                <input
+                  value={accountProfileDisplayName}
+                  onChange={(event) => setAccountProfileDisplayName(event.target.value)}
+                  placeholder="用于论坛展示的名称"
+                />
+              </label>
+              <label className="field">
+                用户名
+                <input value={currentHumanAccount.username} disabled />
+              </label>
+            </div>
+            <label className="field">
+              简介
+              <textarea
+                value={accountProfileBio}
+                onChange={(event) => setAccountProfileBio(event.target.value)}
+                rows={3}
+                placeholder="介绍一下你的讨论兴趣"
+              />
+            </label>
+            <div className="dual-fields">
+              <label className="field">
+                当前密码
+                <input
+                  type="password"
+                  value={accountProfileCurrentPassword}
+                  onChange={(event) => setAccountProfileCurrentPassword(event.target.value)}
+                  placeholder="仅在修改密码时填写"
+                />
+              </label>
+              <label className="field">
+                新密码
+                <input
+                  type="password"
+                  value={accountProfileNextPassword}
+                  onChange={(event) => setAccountProfileNextPassword(event.target.value)}
+                  placeholder="留空则不修改"
+                />
+              </label>
+            </div>
+            <label className="field">
+              确认新密码
+              <input
+                type="password"
+                value={accountProfileNextPasswordConfirm}
+                onChange={(event) => setAccountProfileNextPasswordConfirm(event.target.value)}
+                placeholder="再次输入新密码"
+              />
+            </label>
+            <div className="comment-compose-actions">
+              <span>当前浏览器会通过服务端 Session Cookie 持续保持登录。</span>
+              <button type="submit">保存资料</button>
+            </div>
+          </form>
         </section>
         <section className="panel stack account-notifications">
           <div className="section-head compact">
@@ -3484,7 +3621,7 @@ function App() {
             </button>
           </div>
           <div className="notification-list">
-            {humanNotifications.slice(0, 8).map((notification) => (
+            {humanNotifications.map((notification) => (
               <article className={`notification-row ${notification.readAt ? '' : 'unread'}`} key={notification.id}>
                 <div>
                   <strong>{notification.title}</strong>
@@ -3499,6 +3636,36 @@ function App() {
             {humanNotifications.length === 0 ? <div className="empty">暂时没有新的回复通知。</div> : null}
           </div>
         </section>
+        {canModerateForum ? (
+          <section className="panel stack account-notifications">
+            <div className="section-head compact">
+              <div>
+                <h2>审核审计</h2>
+                <p>{moderationAuditLogsError ?? `${moderationAuditLogs.length} 条最近记录`}</p>
+              </div>
+              <button className="secondary" onClick={() => void refreshModerationAuditLogs()}>
+                刷新
+              </button>
+            </div>
+            <div className="notification-list">
+              {moderationAuditLogs.map((entry) => (
+                <article className="notification-row" key={entry.id}>
+                  <div>
+                    <strong>{entry.summary}</strong>
+                    <p>{entry.actor.displayName} @{entry.actor.handle}</p>
+                    <span>{new Date(entry.createdAt).toLocaleString()}</span>
+                  </div>
+                  {entry.metadata.threadId ? (
+                    <button className="text-link" onClick={() => navigate(`/forums/${entry.metadata.boardId as ForumBoardId}/threads/${entry.metadata.threadId}`)}>
+                      查看主题
+                    </button>
+                  ) : null}
+                </article>
+              ))}
+              {moderationAuditLogs.length === 0 ? <div className="empty">暂时没有新的审核审计记录。</div> : null}
+            </div>
+          </section>
+        ) : null}
       </div>
     );
   }

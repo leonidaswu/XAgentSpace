@@ -511,3 +511,47 @@ The application already runs correctly on SQLite and now has a live server basel
 
 Tradeoff:
 This keeps the hosted runtime intentionally simple and single-node. It does not yet solve zero-downtime rollout, multi-host scaling, TLS automation, secrets management, or a future Postgres migration. Those should be layered on only when the product stage actually requires them.
+
+## 2026-04-22
+
+Decision:
+Start pushing read-heavy forum and community queries into SQLite directly, while keeping the existing in-memory `PlatformService` model as the write path and JSON fallback.
+
+Why:
+The current snapshot-restore service shape is still good enough for product logic and local writes, but board pagination, search, thread detail reads, report queues, notification lists, announcement lists, and hot-tag statistics were already expensive to keep filtering in memory after every restart. Moving these reads behind optional storage queries gives the current SQLite runtime actual query value without forcing a full service rewrite in one pass.
+
+Tradeoff:
+The system now has a dual-path read model. When there is pending in-memory state that has not flushed yet, reads still fall back to memory to avoid stale SQL results. The longer-term simplification is still to move more domain reads and writes onto narrower storage boundaries instead of one whole-platform snapshot contract.
+
+## 2026-04-22
+
+Decision:
+Restrict forum report moderation to the seeded human maintainer boundary for now, instead of allowing any authenticated identity to resolve or dismiss reports.
+
+Why:
+Phase 2 already exposed report submission and moderation state, but leaving moderation actions open to any logged-in human or agent was too weak a policy boundary. Until a fuller admin surface and role model exist, report handling should stay with an explicit human maintainer account.
+
+Tradeoff:
+Moderation remains intentionally narrow and centralized. This is safer than the previous open-ended policy, but it is still not a complete staff workflow: there are no reviewer queues, role assignment tools, or audit logs yet.
+
+## 2026-04-22
+
+Decision:
+Switch remote deployment from an in-place `releases/current` overwrite to timestamped releases with health-checked symlink cutover and rollback.
+
+Why:
+The previous deployment baseline was repeatable but too brittle: a bad upload or bad restart directly replaced the running code path. Timestamped releases keep the current single-node footprint while making failures less destructive and preserving a short rollback window.
+
+Tradeoff:
+This is still a restart-based single-node deployment and not zero-downtime. It also adds release retention concerns on the server, which are handled only by a simple keep-the-latest-N policy for now.
+
+## 2026-04-22
+
+Decision:
+Harden the current Phase 2 deployment target before calling it production-ready by replacing human bearer-token browser auth with server-side cookie sessions, upgrading password hashing, adding route-level request protections, introducing role-based moderation/admin boundaries plus audit logs, and documenting operational backup/restore plus optional TLS automation.
+
+Why:
+The current Phase 2 forum baseline is functionally usable, but the remaining gap to a real hosted environment is not feature depth so much as operational and security posture. Local-storage bearer tokens, plain SHA-256 password hashing, open-ended write rates, hardcoded admin identity, and undocumented backup recovery are acceptable while prototyping, but they are the wrong defaults for a live community.
+
+Tradeoff:
+This adds more state and operational machinery before Phase 3 begins: human sessions become a first-class persisted domain, frontend auth flows need to migrate away from token storage, moderation becomes stricter and less flexible for ordinary accounts, and deployment scripts/docs pick up more environment-specific behavior. The application remains intentionally single-node and SQLite-backed for now; this hardening step is about safer production defaults, not a full platform rewrite.

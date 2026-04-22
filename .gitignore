@@ -7,5 +7,6 @@ data/platform-state.sqlite-wal
 data/platform-state.exported.json
 
 screenshots/
+backups/
 
 .DS_Store

@@ -20,6 +20,9 @@ import type {
   ForumThreadFilters,
   ForumThreadSort,
   HumanNotification,
+  HumanSession,
+  HumanAuthSessionResult,
+  ModerationAuditLog,
   AgentWebSocketSessionResult,
   AgentWebSocketTicketResult,
   CreateAgentAccountInput,
@@ -29,7 +32,6 @@ import type {
   GameStateSnapshot,
   GameSummary,
   HumanAccount,
-  HumanAccountRegistrationResult,
   Match,
   SpectatorEvent
 } from './types.js';
@@ -42,6 +44,7 @@ const AGENT_WS_TICKET_TTL_MS = 60_000;
 export const AGENT_WS_HEARTBEAT_INTERVAL_MS = 15_000;
 export const AGENT_WS_HEARTBEAT_TIMEOUT_MS = 45_000;
 export const AGENT_WS_RESUME_WINDOW_MS = 120_000;
+const HUMAN_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 14;
 const FORUM_BOARDS: ForumBoard[] = [
   {
     id: 'human',
@@ -77,6 +80,30 @@ function issueOpaqueToken(prefix: string) {
 
 function hashToken(token: string) {
   return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function hashPassword(password: string) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derivedKey = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `scrypt_v1:${salt}:${derivedKey}`;
+}
+
+function verifyPassword(password: string, storedHash?: string) {
+  if (!storedHash) {
+    return false;
+  }
+
+  if (storedHash.startsWith('scrypt_v1:')) {
+    const [, salt, expected] = storedHash.split(':');
+    if (!salt || !expected) {
+      return false;
+    }
+    const actual = crypto.scryptSync(password, salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'));
+  }
+
+  // Legacy fallback for pre-hardening accounts. Successful login should upgrade the hash.
+  return hashToken(password) === storedHash;
 }
 
 function validateUsername(username: string) {
@@ -142,10 +169,12 @@ export class PlatformService extends EventEmitter {
   private readonly agentAccounts = new Map<string, AgentAccount>();
   private readonly humanAuthTokens = new Map<string, string>();
   private readonly agentAuthTokens = new Map<string, string>();
+  private readonly humanSessions = new Map<string, HumanSession>();
   private readonly forumThreads = new Map<string, ForumThread>();
   private readonly forumPosts = new Map<string, ForumPost[]>();
   private readonly forumPostReactions = new Map<string, ForumPostReaction>();
   private readonly forumReports = new Map<string, ForumReport[]>();
+  private readonly moderationAuditLogs: ModerationAuditLog[] = [];
   private readonly humanNotifications = new Map<string, HumanNotification[]>();
   private readonly announcements = new Map<string, Announcement>();
   private readonly agentWebSocketTickets = new Map<string, AgentWebSocketTicketRecord>();
@@ -191,6 +220,7 @@ export class PlatformService extends EventEmitter {
     }
 
     for (const human of state.humans ?? []) {
+      human.role ??= human.username === 'arena_admin' ? 'admin' : 'member';
       this.humans.set(human.id, human);
     }
 
@@ -204,6 +234,12 @@ export class PlatformService extends EventEmitter {
 
     for (const [agentId, tokenHash] of state.agentAuthTokens ?? []) {
       this.agentAuthTokens.set(agentId, tokenHash);
+    }
+
+    for (const session of state.humanSessions ?? []) {
+      if (!session.revokedAt && session.expiresAt > now()) {
+        this.humanSessions.set(session.sessionTokenHash, session);
+      }
     }
 
     for (const thread of state.forumThreads ?? []) {
@@ -236,6 +272,10 @@ export class PlatformService extends EventEmitter {
       this.humanNotifications.set(notification.humanId, notifications);
     }
 
+    for (const auditLog of state.moderationAuditLogs ?? []) {
+      this.moderationAuditLogs.push(auditLog);
+    }
+
     for (const announcement of state.announcements ?? []) {
       this.announcements.set(announcement.id, announcement);
     }
@@ -252,6 +292,8 @@ export class PlatformService extends EventEmitter {
       forumPostReactions: [...this.forumPostReactions.values()],
       forumReports: [...this.forumReports.values()].flat(),
       humanNotifications: [...this.humanNotifications.values()].flat(),
+      humanSessions: [...this.humanSessions.values()],
+      moderationAuditLogs: [...this.moderationAuditLogs],
       announcements: [...this.announcements.values()],
       gameStates: [...this.games.entries()].map(([gameId, game]) => [gameId, game.exportState()])
     };
@@ -272,13 +314,32 @@ export class PlatformService extends EventEmitter {
     this.storage.save(this.serializeState());
   }
 
+  private canReadFromStorage() {
+    return !this.persistTimer;
+  }
+
+  private pruneExpiredHumanSessions() {
+    const currentTimestamp = now();
+    for (const [tokenHash, session] of this.humanSessions.entries()) {
+      if (session.revokedAt || session.expiresAt <= currentTimestamp) {
+        this.humanSessions.delete(tokenHash);
+      }
+    }
+  }
+
   private seedIdentity() {
-    this.createHumanAccount({
-      username: 'arena_admin',
-      displayName: 'Arena Admin',
-      password: 'arena_admin_2026',
-      bio: '平台当前阶段的默认人类维护者账户。'
+    const seedAdminUsername = process.env.XAGENTSPACE_SEED_ADMIN_USERNAME?.trim() || 'arena_admin';
+    const seedAdminDisplayName = process.env.XAGENTSPACE_SEED_ADMIN_DISPLAY_NAME?.trim() || 'Arena Admin';
+    const seedAdminPassword = process.env.XAGENTSPACE_SEED_ADMIN_PASSWORD?.trim() || 'arena_admin_2026';
+    const seedAdminBio = process.env.XAGENTSPACE_SEED_ADMIN_BIO?.trim() || '平台当前阶段的默认人类维护者账户。';
+    const admin = this.createHumanAccount({
+      username: seedAdminUsername,
+      displayName: seedAdminDisplayName,
+      password: seedAdminPassword,
+      bio: seedAdminBio
     });
+    admin.account.role = 'admin';
+    this.humanSessions.clear();
     const alpha = this.createAgentAccount({
       handle: 'alpha_wolf',
       displayName: 'Alpha Wolf',
@@ -319,7 +380,7 @@ export class PlatformService extends EventEmitter {
       return;
     }
 
-    const admin = this.listHumanAccounts()[0];
+    const admin = this.listHumanAccounts().find((item) => item.role === 'admin') ?? this.listHumanAccounts()[0];
     const agent = this.listAgentAccounts().find((item) => item.handle === 'openclaw_work') ?? this.listAgentAccounts()[0];
     if (!admin || !agent) {
       return;
@@ -353,7 +414,7 @@ export class PlatformService extends EventEmitter {
       return;
     }
 
-    const admin = [...this.humans.values()].find((item) => item.username === 'arena_admin') ?? this.listHumanAccounts()[0];
+    const admin = this.listHumanAccounts().find((item) => item.role === 'admin') ?? this.listHumanAccounts()[0];
     const agent = this.listAgentAccounts().find((item) => item.handle === 'openclaw_work') ?? this.listAgentAccounts()[0];
     if (!admin || !agent) {
       return;
@@ -737,7 +798,28 @@ export class PlatformService extends EventEmitter {
     }
 
     const account = this.humans.get(actorId);
-    return account?.username === 'arena_admin';
+    return account?.role === 'admin';
+  }
+
+  private isForumModerator(actorKind: 'human' | 'agent', actorId: string) {
+    if (actorKind !== 'human') {
+      return false;
+    }
+
+    const account = this.humans.get(actorId);
+    return account?.role === 'admin' || account?.role === 'moderator';
+  }
+
+  private appendModerationAuditLog(log: Omit<ModerationAuditLog, 'id' | 'createdAt'>) {
+    const auditLog: ModerationAuditLog = {
+      id: createId('audit'),
+      createdAt: now(),
+      ...log
+    };
+    this.moderationAuditLogs.unshift(auditLog);
+    if (this.moderationAuditLogs.length > 5000) {
+      this.moderationAuditLogs.length = 5000;
+    }
   }
 
   private canManageAnnouncement(announcement: Announcement, actorKind: 'human' | 'agent', actorId: string) {
@@ -763,12 +845,44 @@ export class PlatformService extends EventEmitter {
     const includeArchived = Boolean(query?.includeArchived);
     const sort = query?.sort === 'latest' ? 'latest' : 'pinned';
     const limit = this.normalizePageLimit(query?.limit, includeArchived ? 50 : 5);
+    if (this.canReadFromStorage() && this.storage.listAnnouncements) {
+      return this.storage.listAnnouncements({ includeArchived, sort, limit });
+    }
     const visible = [...this.announcements.values()].filter((item) => includeArchived || item.status !== 'archived');
     return this.sortAnnouncements(visible, sort).slice(0, limit);
   }
 
   getAnnouncement(announcementId: string) {
+    if (this.canReadFromStorage() && this.storage.getAnnouncement) {
+      const announcement = this.storage.getAnnouncement(announcementId);
+      if (!announcement) {
+        throw new Error(`Unknown announcement: ${announcementId}`);
+      }
+      return announcement;
+    }
     return this.requireAnnouncement(announcementId);
+  }
+
+  listHotForumTags(input?: { limit?: number; boardId?: ForumBoardId }) {
+    const limit = this.normalizePageLimit(input?.limit, 8);
+    if (this.canReadFromStorage() && this.storage.listForumTagStats) {
+      return this.storage.listForumTagStats({ limit, boardId: input?.boardId }).map((item) => item.tag);
+    }
+
+    const counts = new Map<string, number>();
+    for (const thread of this.forumThreads.values()) {
+      if (input?.boardId && thread.boardId !== input.boardId) {
+        continue;
+      }
+      for (const tag of thread.tags) {
+        counts.set(tag, (counts.get(tag) ?? 0) + Math.max(1, thread.postCount));
+      }
+    }
+
+    return [...counts.entries()]
+      .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+      .slice(0, limit)
+      .map(([tag]) => tag);
   }
 
   createAnnouncement(input: AnnouncementInput) {
@@ -940,6 +1054,14 @@ export class PlatformService extends EventEmitter {
   getForumBoard(boardId: ForumBoardId, filtersInput?: ForumThreadFilters, pagination?: { cursor?: string; limit?: number }): ForumBoardSnapshot {
     const board = this.requireForumBoard(boardId);
     const filters = this.normalizeForumFilters(filtersInput);
+    if (this.canReadFromStorage() && this.storage.queryForumBoard) {
+      const snapshot = this.storage.queryForumBoard(boardId, filters, pagination);
+      return {
+        board,
+        filters,
+        ...snapshot
+      };
+    }
     const threads = [...this.forumThreads.values()]
       .filter((thread) => thread.boardId === boardId)
       .filter((thread) => this.threadMatchesFilters(thread, this.forumPosts.get(thread.id) ?? [], filters));
@@ -974,6 +1096,9 @@ export class PlatformService extends EventEmitter {
 
   listForumThreadsForMatch(gameId: string, matchId: string): ForumThread[] {
     this.requireGameMatchLink(gameId, matchId);
+    if (this.canReadFromStorage() && this.storage.listForumThreadsForMatch) {
+      return this.storage.listForumThreadsForMatch(gameId, matchId);
+    }
     return [...this.forumThreads.values()]
       .filter((thread) => thread.matchLink?.gameId === gameId && thread.matchLink.matchId === matchId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -981,6 +1106,9 @@ export class PlatformService extends EventEmitter {
 
   searchForumThreads(filtersInput: ForumThreadFilters & { boardId?: ForumBoardId }) {
     const filters = this.normalizeForumFilters(filtersInput);
+    if (this.canReadFromStorage() && this.storage.searchForumThreads) {
+      return this.storage.searchForumThreads({ ...filters, boardId: filtersInput.boardId, limit: 50 });
+    }
     const threads = [...this.forumThreads.values()]
       .filter((thread) => !filtersInput.boardId || thread.boardId === filtersInput.boardId)
       .filter((thread) => this.threadMatchesFilters(thread, this.forumPosts.get(thread.id) ?? [], filters));
@@ -988,6 +1116,16 @@ export class PlatformService extends EventEmitter {
   }
 
   getForumThread(threadId: string, pagination?: { cursor?: string; limit?: number; sort?: 'latest' | 'hot' }): ForumThreadDetail {
+    if (this.canReadFromStorage() && this.storage.queryForumThread) {
+      const snapshot = this.storage.queryForumThread(threadId, pagination);
+      if (!snapshot) {
+        throw new Error(`Unknown forum thread: ${threadId}`);
+      }
+      return {
+        board: this.requireForumBoard(snapshot.thread.boardId),
+        ...snapshot
+      };
+    }
     const thread = this.requireForumThread(threadId);
     const board = this.requireForumBoard(thread.boardId);
     const allPosts = [...(this.forumPosts.get(thread.id) ?? [])];
@@ -1252,7 +1390,20 @@ export class PlatformService extends EventEmitter {
       throw new Error(`Unknown human account: ${humanId}`);
     }
 
+    if (this.canReadFromStorage() && this.storage.listHumanNotifications) {
+      return this.storage.listHumanNotifications(humanId);
+    }
     return [...(this.humanNotifications.get(humanId) ?? [])].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  listModerationAuditLogs(query?: { scope?: ModerationAuditLog['scope']; limit?: number }) {
+    const limit = this.normalizePageLimit(query?.limit, 50);
+    if (this.canReadFromStorage() && this.storage.listModerationAuditLogs) {
+      return this.storage.listModerationAuditLogs({ scope: query?.scope, limit });
+    }
+    return this.moderationAuditLogs
+      .filter((entry) => !query?.scope || entry.scope === query.scope)
+      .slice(0, limit);
   }
 
   markHumanNotificationsRead(humanId: string) {
@@ -1316,6 +1467,9 @@ export class PlatformService extends EventEmitter {
   }
 
   listForumReports(filters?: { status?: ForumReport['status'] | 'all'; boardId?: ForumBoardId }) {
+    if (this.canReadFromStorage() && this.storage.listForumReports) {
+      return this.storage.listForumReports(filters);
+    }
     return [...this.forumReports.values()]
       .flat()
       .filter((report) => !filters?.boardId || report.boardId === filters.boardId)
@@ -1336,6 +1490,9 @@ export class PlatformService extends EventEmitter {
     if (!report) {
       throw new Error(`Unknown forum report: ${reportId}`);
     }
+    if (!this.isForumModerator(input.moderatorKind, input.moderatorId)) {
+      throw new Error('You do not have permission to moderate forum reports');
+    }
 
     if (!['open', 'reviewing', 'resolved', 'dismissed'].includes(input.status)) {
       throw new Error('Unknown forum report status');
@@ -1346,10 +1503,25 @@ export class PlatformService extends EventEmitter {
       throw new Error('Forum moderation note must be 500 characters or fewer');
     }
 
+    const previousStatus = report.status;
     report.status = input.status;
     report.moderator = this.createForumAuthorRef(input.moderatorKind, input.moderatorId);
     report.resolutionNote = note || undefined;
     report.updatedAt = now();
+    this.appendModerationAuditLog({
+      scope: 'forum_report',
+      action: 'status_changed',
+      targetId: report.id,
+      actor: report.moderator,
+      summary: `Forum report moved to ${input.status}`,
+      metadata: {
+        boardId: report.boardId,
+        threadId: report.threadId,
+        postId: report.postId,
+        previousStatus,
+        nextStatus: input.status
+      }
+    });
     this.schedulePersist();
     return report;
   }
@@ -1366,7 +1538,75 @@ export class PlatformService extends EventEmitter {
     return this.agentAccounts.get(agentId) ?? null;
   }
 
-  authenticateHuman(humanId: string, token: string) {
+  private issueHumanSession(account: HumanAccount) {
+    this.pruneExpiredHumanSessions();
+    const issuedSessionToken = issueOpaqueToken('human_session');
+    const session: HumanSession = {
+      id: createId('session'),
+      humanId: account.id,
+      sessionTokenHash: hashToken(issuedSessionToken),
+      createdAt: now(),
+      lastUsedAt: now(),
+      expiresAt: new Date(Date.now() + HUMAN_SESSION_TTL_MS).toISOString()
+    };
+    this.humanSessions.set(session.sessionTokenHash, session);
+    this.schedulePersist();
+    return {
+      issuedSessionToken,
+      sessionExpiresAt: session.expiresAt
+    };
+  }
+
+  revokeHumanSession(sessionToken: string) {
+    if (!sessionToken) {
+      return;
+    }
+    const tokenHash = hashToken(sessionToken);
+    const session = this.humanSessions.get(tokenHash);
+    if (!session) {
+      return;
+    }
+    session.revokedAt = now();
+    this.humanSessions.delete(tokenHash);
+    this.schedulePersist();
+  }
+
+  authenticateHumanSession(sessionToken: string, expectedHumanId?: string) {
+    this.pruneExpiredHumanSessions();
+    if (!sessionToken) {
+      throw new Error('No active human session');
+    }
+
+    const tokenHash = hashToken(sessionToken);
+    const session = this.humanSessions.get(tokenHash);
+    if (!session || session.revokedAt || session.expiresAt <= now()) {
+      throw new Error('Human session is invalid or expired');
+    }
+    if (expectedHumanId && session.humanId !== expectedHumanId) {
+      throw new Error('Human session does not belong to this account');
+    }
+
+    const account = this.humans.get(session.humanId);
+    if (!account) {
+      throw new Error(`Unknown human account: ${session.humanId}`);
+    }
+    if (account.lifecycleState !== 'active') {
+      throw new Error('Human account is not active');
+    }
+
+    const currentTime = now();
+    if (session.lastUsedAt < new Date(Date.now() - 1000 * 60 * 15).toISOString()) {
+      session.lastUsedAt = currentTime;
+      this.schedulePersist();
+    }
+
+    return {
+      account,
+      session
+    };
+  }
+
+  authenticateHumanBearer(humanId: string, token: string) {
     const account = this.humans.get(humanId);
     if (!account) {
       throw new Error(`Unknown human account: ${humanId}`);
@@ -1379,6 +1619,10 @@ export class PlatformService extends EventEmitter {
       throw new Error('Invalid human auth token');
     }
     return account;
+  }
+
+  authenticateHuman(humanId: string, token: string) {
+    return this.authenticateHumanBearer(humanId, token);
   }
 
   authenticateAgent(agentId: string, token: string) {
@@ -1624,7 +1868,42 @@ export class PlatformService extends EventEmitter {
     return account;
   }
 
-  createHumanAccount(input: CreateHumanAccountInput): HumanAccountRegistrationResult {
+  updateHumanAccountProfile(
+    humanId: string,
+    input: {
+      displayName?: string;
+      bio?: string;
+      currentPassword?: string;
+      nextPassword?: string;
+    }
+  ) {
+    const account = this.humans.get(humanId);
+    if (!account) {
+      throw new Error(`Unknown human account: ${humanId}`);
+    }
+
+    const nextDisplayName = input.displayName?.trim() ?? account.displayName;
+    const nextBio = input.bio?.trim() ?? account.bio;
+    validateDisplayName(nextDisplayName, 'Human');
+    validateBioLength(nextBio);
+
+    const nextPassword = input.nextPassword?.trim();
+    if (nextPassword) {
+      const currentPassword = input.currentPassword ?? '';
+      if (!verifyPassword(currentPassword, account.passwordHash)) {
+        throw new Error('Current password is incorrect');
+      }
+      validatePassword(nextPassword);
+      account.passwordHash = hashPassword(nextPassword);
+    }
+
+    account.displayName = nextDisplayName;
+    account.bio = nextBio;
+    this.schedulePersist();
+    return account;
+  }
+
+  createHumanAccount(input: CreateHumanAccountInput): HumanAuthSessionResult & { issuedSessionToken: string } {
     const username = input.username.trim();
     const displayName = input.displayName.trim();
     const password = input.password ?? '';
@@ -1642,33 +1921,39 @@ export class PlatformService extends EventEmitter {
       username,
       displayName,
       bio,
-      passwordHash: hashToken(password),
+      role: 'member',
+      passwordHash: hashPassword(password),
       lifecycleState: 'active',
       createdAt: now()
     };
-    const issuedAuthToken = issueOpaqueToken('humanpat');
 
     this.humans.set(account.id, account);
-    this.humanAuthTokens.set(account.id, hashToken(issuedAuthToken));
     this.schedulePersist();
-    return { account, issuedAuthToken };
+    return {
+      account,
+      ...this.issueHumanSession(account)
+    };
   }
 
-  loginHumanAccount(input: { username?: string; password?: string }): HumanAccountRegistrationResult {
+  loginHumanAccount(input: { username?: string; password?: string }): HumanAuthSessionResult & { issuedSessionToken: string } {
     const username = input.username?.trim() ?? '';
     const password = input.password ?? '';
     const account = [...this.humans.values()].find((human) => human.username === username);
-    if (!account || !account.passwordHash || hashToken(password) !== account.passwordHash) {
+    if (!account || !verifyPassword(password, account.passwordHash)) {
       throw new Error('Invalid username or password');
     }
     if (account.lifecycleState !== 'active') {
       throw new Error('Human account is not active');
     }
 
-    const issuedAuthToken = issueOpaqueToken('humanpat');
-    this.humanAuthTokens.set(account.id, hashToken(issuedAuthToken));
+    if (!account.passwordHash?.startsWith('scrypt_v1:')) {
+      account.passwordHash = hashPassword(password);
+    }
     this.schedulePersist();
-    return { account, issuedAuthToken };
+    return {
+      account,
+      ...this.issueHumanSession(account)
+    };
   }
 
   listAgentAccounts() {

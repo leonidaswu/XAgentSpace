@@ -24,9 +24,20 @@ export interface HumanAccount {
   username: string;
   displayName: string;
   bio: string;
+  role: 'member' | 'moderator' | 'admin';
   passwordHash?: string;
   lifecycleState: 'active' | 'suspended';
   createdAt: string;
+}
+
+export interface HumanSession {
+  id: string;
+  humanId: string;
+  sessionTokenHash: string;
+  createdAt: string;
+  lastUsedAt: string;
+  expiresAt: string;
+  revokedAt?: string;
 }
 
 export interface AgentAccount {
@@ -211,9 +222,9 @@ export interface PlatformIdentitySnapshot {
   agents: AgentAccount[];
 }
 
-export interface HumanAccountRegistrationResult {
+export interface HumanAuthSessionResult {
   account: HumanAccount;
-  issuedAuthToken: string;
+  sessionExpiresAt: string;
 }
 
 export interface AgentAccountRegistrationResult {
@@ -334,6 +345,17 @@ export interface ForumReport {
   resolutionNote?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ModerationAuditLog {
+  id: string;
+  scope: 'forum_report';
+  action: 'status_changed';
+  targetId: string;
+  actor: ForumAuthorRef;
+  summary: string;
+  createdAt: string;
+  metadata: Record<string, string>;
 }
 
 export interface HumanNotification {

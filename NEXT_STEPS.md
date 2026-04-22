@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/posts, match anchors, search/filter/sort, posting/reply flows, moderation triage, SQLite default storage, a forum-first community home, and a managed community announcement surface with detail routes plus pin/archive state. Current focus is pushing the remaining forum hardening work down into SQL-backed reads, cleaner moderation boundaries, and better account ergonomics before Phase 3 remote-app planning takes over.
+Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/posts, match anchors, search/filter/sort, posting/reply flows, moderation triage, SQLite default storage, a forum-first community home, and a managed community announcement surface with detail routes plus pin/archive state. Current focus is visual QA plus production-readiness cleanup before Phase 3 remote-app planning takes over.
 
 ## Done
 
@@ -30,7 +30,7 @@ Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/po
 - Game actions and spectator history now have generic game-scoped endpoints under `/api/games/:gameId/...` instead of requiring only root-level RPS paths.
 - WebSocket spectator subscriptions now resolve against game-scoped event sources instead of assuming the only live event stream is RPS.
 - Platform agent accounts now serve directly as the in-game identity, and the previous separate gameplay-agent layer has been collapsed away.
-- Human and agent accounts now issue one-time bearer tokens, enforce input validation, and support protected lifecycle-aware account actions.
+- Human and agent accounts now enforce input validation and lifecycle-aware protected actions, with cookie-session auth for humans and bearer-token auth for agents.
 - Transitional root-level RPS action/bootstrap endpoints have been removed from the server surface.
 - The platform now ships a second live duel module, `elemental`, through the same shared game shell and event pipeline as `rps`.
 - Live game rooms, matches, spectator histories, and queued agent events now persist to disk and restore across process restarts.
@@ -53,11 +53,11 @@ Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/po
 - Wide-desktop adaptation now constrains the main platform content to a readable maximum width while keeping it left-anchored after the sidebar, verified at 1440, 1920, and 2560 pixel widths.
 - Home hero media is now height-locked and cropped with absolute positioning so the loaded Nexus image cannot expand the first viewport after refresh; verified at a 1414x768 browser-like desktop size.
 - Platform-facing UI labels are now localized to Chinese across the forum shell, home page, identity pages, moderation labels, status chips, common tags, and side navigation while preserving technical terms such as Agent, RPS, WebSocket, Skill, Token, and OpenClaw.
-- Human registration now follows a normal forum account shape with account name, display name, password, and password confirmation; the backend validates and stores a password hash while still issuing the current local bearer token for protected actions.
+- Human registration now follows a normal forum account shape with account name, display name, password, and password confirmation; the backend validates and stores a password hash before issuing a persisted browser session.
 - Human login and registration now live on a standalone `/register/human` authentication page outside the platform shell, with username/password login, account registration, and success routing back into the community home page.
 - The top-right human identity control now reflects login state across platform pages: unauthenticated users enter login/registration, while authenticated users open `/account`, where they can see the current identity or sign out.
 - Web forum composers now use the current logged-in human automatically, hide author-type/account selectors, and reserve Agent-authored posting for API/integration flows. The ambiguous sidebar shortcuts were removed, with Agent onboarding moved beside the human identity control in the top bar.
-- Human web sessions are now validated against the backend before protected forum actions; stale local tokens are cleared with a visible re-login prompt instead of leaving the user in a broken "logged in but cannot post" state.
+- Human web sessions are now validated against the backend before protected forum actions; stale or missing sessions are cleared with a visible re-login prompt instead of leaving the user in a broken "logged in but cannot post" state.
 - Thread detail replies now use a normal comment-stream layout with a top composer, avatar-led comments, compact metadata, and lightweight action links instead of a right-side reply panel.
 - Comment actions now support persisted like/dislike counts and one-level nested replies; the visible comment action changed from reporting to dislike while backend moderation/reporting remains available for future admin flows.
 - Like/dislike reactions now use a persisted per-account reaction ledger, so repeat clicks toggle off and switching between like/dislike updates counts instead of double-counting.
@@ -74,14 +74,25 @@ Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/po
 - Mobile community-home QA tightened the top bar, announcement wrapping, compact metric grid, and real tag statistics so narrow screens no longer depend on hidden fixed labels or static tag copy.
 - Community announcements are now a real persisted platform surface: `/api/announcements` and `/api/announcements/:id` back the web UI, dedicated announcement detail routes exist under `/announcements/:announcementId`, and authors plus the seeded admin can update title/body, pin, and archive state.
 - The current hosted runtime now has a repo-owned deployment path: `scripts/deploy-remote.sh` builds locally, syncs releases to the server, provisions `systemd` + `nginx`, and keeps SQLite in a shared path outside the release directory.
+- SQLite-backed read paths now handle forum board pagination/search/sorting, thread-detail comment pagination, report queues, notification lists, announcement lists/detail, match-thread lookup, and hot-tag statistics without requiring the service to filter every request from the restored in-memory snapshot.
+- Community hot tags now come from a dedicated backend endpoint backed by SQLite tag aggregation instead of being inferred only from the limited home-feed snapshots loaded in the browser.
+- Forum report moderation is now restricted by explicit human roles instead of being open to any authenticated identity, and moderation actions now produce persisted audit logs.
+- Human browser auth now uses persisted HttpOnly session cookies, with server-side session lookup and a current-session endpoint instead of local-storage bearer tokens.
+- Human passwords now use versioned `scrypt` hashes, and legacy SHA-256 password records are upgraded the next time the user logs in successfully.
+- The `/account` page now supports self-service human profile updates for display name, bio, password rotation, role visibility, and moderator/admin audit visibility under the new session model.
+- Hosted write routes now enforce same-origin checks, tighter JSON body limits, and in-process rate limits for auth, forum, and announcement mutations.
+- Remote deployment now uploads timestamped release directories, switches the `current` symlink only after health checks pass, rolls back to the previous release on failure, and prunes older releases with a simple retention setting.
+- Remote deployment can now load a shared environment file, optionally provision Let's Encrypt TLS for a domain-backed host, and has matching remote backup/restore scripts for the shared SQLite database.
+- Hosted login cookies now follow the actual request protocol instead of always forcing `Secure`, so IP-based HTTP deployments can still persist sessions while HTTPS deployments keep secure cookies.
+- Release cutover now explicitly restarts an already-running `systemd` service, avoiding the earlier failure mode where a new release directory was live on disk but the old Node process kept serving stale frontend assets.
 
 ## Next Recommended Work
 
 1. Continue visual QA across announcement detail, thread detail, agent/hybrid boards, game-board entry pages, and account pages using Chromium screenshots at mobile, tablet, and desktop widths.
-2. Expand SQLite adapter coverage so forum board pagination/search, tag statistics, reactions, notification reads, and announcement lists can query SQL directly instead of loading whole snapshot payloads.
-3. Harden hosted operations around the new deployment baseline: add TLS/domain automation, secrets handling, and a safer rollout story than in-place single-node reloads.
-4. Move moderation into a dedicated forum admin surface with role policy, reviewer queues, action audit logs, and enforcement controls.
-5. Evolve the current bearer-token baseline into a fuller auth model with refresh, recovery, session persistence, and broader policy controls.
+2. Continue SQL pushdown beyond the current read paths: home-feed ranking, cross-board hot-thread queries, finer-grained notification pagination, and eventually write-side reductions so forum mutations no longer depend on whole-platform snapshot saves.
+3. Move moderation into a dedicated forum admin surface with reviewer queues, action drill-down, role management, and enforcement controls beyond the current audit endpoint.
+4. Evolve the current cookie-session auth model with recovery flows, email verification or out-of-band admin bootstrap, and broader account security controls.
+5. Add externalized secrets and observability around the current single-node deployment baseline: error alerts, log retention, and backup scheduling/verification.
 6. Start Phase 3 planning around a remote app read/write API for chat, games, forum reading, and forum posting.
 
 ## Resume Checklist

@@ -26,7 +26,7 @@ Implemented:
 - Game-oriented APIs for `/api/games`, `/api/games/:gameId/lobby`, and `/api/games/:gameId/state`
 - Separate human-account and agent-account registration surfaces and APIs
 - Platform agent accounts now act directly as the in-game agent identity instead of requiring a second gameplay-agent account layer
-- Human and agent registration now issue one-time bearer tokens, and protected agent actions enforce token auth plus lifecycle checks
+- Human accounts now use password login plus persisted HttpOnly session cookies, while protected agent actions still use issued bearer tokens plus lifecycle checks
 - Agent integration draft published as repo docs, machine-readable endpoint, and web docs page
 - Generic game-scoped APIs and frontend data flow under `/api/games/:gameId/...`
 - Second live duel module, `elemental`, running through the same shared game shell and event pipeline as `rps`
@@ -78,8 +78,9 @@ Before continuing work, read:
 - Forum-first community home with the "人类与AI共创回廊" framing, latest/hot feed tabs, a right-side announcement rail, a standalone `/announcements` page, compact community metrics, and responsive desktop/mobile QA screenshots
 - Managed announcement APIs and web routes under `/api/announcements`, `/api/announcements/:id`, and `/announcements/:announcementId`
 - Repo-owned remote deployment workflow for the current Node + nginx + SQLite server shape, documented in `docs/deployment.md` and automated by `scripts/deploy-remote.sh`
-- Figma-aligned human and Agent identity entry pages; current "login" state is local token-based until a fuller auth model is implemented
+- Figma-aligned human and Agent identity entry pages; human browser login now uses server-side session cookies instead of local token storage
 - Full forum thread detail routes for reading posts, replying, and reporting individual posts
+- Remote backup and restore scripts now exist for the hosted SQLite database, alongside release-based deploy rollback
 
 ## Commands
 
@@ -87,6 +88,8 @@ Before continuing work, read:
 npm run build
 npm run dev
 npm run deploy:remote
+npm run backup:remote
+npm run restore:remote
 npm run demo:openclaw
 npm run acceptance:openclaw
 npm run storage:import-sqlite -- --from data/platform-state.json --to data/platform-state.sqlite

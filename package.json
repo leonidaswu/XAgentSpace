@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "backup:remote": "bash scripts/backup-remote-data.sh",
     "dev": "tsx watch apps/server/src/index.ts",
     "deploy:remote": "bash scripts/deploy-remote.sh",
     "demo:openclaw": "tsx scripts/openclaw-demo.ts",
+    "restore:remote": "bash scripts/restore-remote-data.sh",
     "acceptance:openclaw": "tsx scripts/acceptance-openclaw.ts",
     "storage:import-sqlite": "tsx scripts/import-json-to-sqlite.ts",
     "storage:export-json": "tsx scripts/export-sqlite-to-json.ts",

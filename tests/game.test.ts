@@ -29,6 +29,14 @@ class MemoryPlatformStorage implements PlatformStorage {
   }
 }
 
+function readSessionCookie(response: { headers: Record<string, string | string[] | undefined> }) {
+  const setCookie = response.headers['set-cookie'];
+  const cookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
+  const cookie = cookies.find((value: string) => value.startsWith('xagentspace_human_session='));
+  assert.ok(cookie, 'expected human session cookie');
+  return cookie.split(';')[0];
+}
+
 function createIsolatedPlatform() {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-arena-platform-'));
   const stateFilePath = path.join(stateDir, 'platform-state.json');
@@ -321,6 +329,21 @@ test('agent-controlled routes require a valid bearer token and respect lifecycle
       .post(`/api/platform/agent-accounts/${registration.body.account.id}/lifecycle`)
       .set('Authorization', `Bearer ${registration.body.issuedAuthToken}`)
       .send({ lifecycleState: 'revoked' })
+      .expect(401);
+
+    const adminLogin = await request(app)
+      .post('/api/platform/humans/login')
+      .send({
+        username: 'arena_admin',
+        password: 'arena_admin_2026'
+      })
+      .expect(200);
+    const adminCookie = readSessionCookie(adminLogin);
+
+    await request(app)
+      .post(`/api/platform/agent-accounts/${registration.body.account.id}/lifecycle`)
+      .set('Cookie', adminCookie)
+      .send({ lifecycleState: 'revoked' })
       .expect(200);
 
     await request(app)
@@ -333,7 +356,7 @@ test('agent-controlled routes require a valid bearer token and respect lifecycle
   }
 });
 
-test('account registration applies validation and returns one-time auth tokens', async () => {
+test('account registration uses session cookies for humans and one-time auth tokens for agents', async () => {
   const isolated = createIsolatedPlatform();
 
   try {
@@ -342,26 +365,40 @@ test('account registration applies validation and returns one-time auth tokens',
       .post('/api/platform/humans')
       .send({ username: 'player_two', displayName: 'Player Two', password: 'player_two_2026', bio: 'Human tester' })
       .expect(201);
+    const humanCookie = readSessionCookie(human);
 
-    assert.ok(typeof human.body.issuedAuthToken === 'string' && human.body.issuedAuthToken.length > 20);
+    assert.ok(typeof human.body.sessionExpiresAt === 'string' && human.body.sessionExpiresAt.length > 10);
 
     const humanLogin = await request(app)
       .post('/api/platform/humans/login')
       .send({ username: 'player_two', password: 'player_two_2026' })
       .expect(200);
+    const humanLoginCookie = readSessionCookie(humanLogin);
 
     assert.equal(humanLogin.body.account.id, human.body.account.id);
-    assert.ok(typeof humanLogin.body.issuedAuthToken === 'string' && humanLogin.body.issuedAuthToken.length > 20);
+    assert.ok(typeof humanLogin.body.sessionExpiresAt === 'string' && humanLogin.body.sessionExpiresAt.length > 10);
 
     await request(app)
-      .get(`/api/platform/humans/${human.body.account.id}/session`)
-      .set('Authorization', `Bearer ${humanLogin.body.issuedAuthToken}`)
+      .get('/api/platform/humans/session')
+      .set('Cookie', humanLoginCookie)
       .expect(200);
 
     await request(app)
-      .get(`/api/platform/humans/${human.body.account.id}/session`)
-      .set('Authorization', 'Bearer stale_token')
+      .get('/api/platform/humans/session')
       .expect(401);
+
+    await request(app)
+      .post('/api/platform/humans/logout')
+      .set('Cookie', humanCookie)
+      .expect(204);
+
+    await request(app)
+      .get('/api/platform/humans/session')
+      .set('Cookie', humanCookie)
+      .expect(401);
+
+    const humansList = await request(app).get('/api/platform/humans').expect(200);
+    assert.equal('passwordHash' in humansList.body[0], false);
 
     await request(app)
       .post('/api/platform/humans/login')
@@ -756,6 +793,13 @@ test('sqlite storage adapter saves and restores platform state', async () => {
       password: 'sqlite_user_2026',
       bio: 'Exercises SQLite storage persistence.'
     });
+    first.createForumThread('human', {
+      title: 'SQLite 查询路径验证主题',
+      body: '这条主题用于验证论坛列表、搜索和标签统计可以从 SQLite 直接读取。',
+      authorKind: 'human',
+      authorId: registration.account.id,
+      tags: ['sqlite', 'query']
+    });
     const announcement = first.createAnnouncement({
       title: 'SQLite 公告恢复验证',
       summary: 'SQLite 存储应完整保存公告记录。',
@@ -774,6 +818,12 @@ test('sqlite storage adapter saves and restores platform state', async () => {
       second.listHumanAccounts().some((human) => human.id === registration.account.id),
       true
     );
+    assert.equal(
+      second.getForumBoard('human', { search: 'SQLite', sort: 'latest' }, { limit: 10 }).threads.some((thread) => thread.title.includes('SQLite')),
+      true
+    );
+    assert.equal(second.searchForumThreads({ boardId: 'human', tag: 'sqlite', sort: 'latest' }).length >= 1, true);
+    assert.equal(second.listHotForumTags({ limit: 8 }).includes('sqlite'), true);
     assert.equal(second.getAnnouncement(announcement.id).title, 'SQLite 公告恢复验证');
     secondStorage.close();
   } finally {
@@ -833,15 +883,17 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
       .post('/api/platform/humans')
       .send({ username: 'forum_owner', displayName: 'Forum Owner', password: 'forum_owner_2026', bio: 'Forum bootstrap author' })
       .expect(201);
+    const humanCookie = readSessionCookie(humanRegistration);
 
     const replyingHumanRegistration = await request(app)
       .post('/api/platform/humans')
       .send({ username: 'forum_reader', displayName: 'Forum Reader', password: 'forum_reader_2026', bio: 'Forum reply author' })
       .expect(201);
+    const replyingHumanCookie = readSessionCookie(replyingHumanRegistration);
 
     const threadResponse = await request(app)
       .post('/api/forums/human/threads')
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         title: 'Arena 收官后论坛第一批帖子应该怎么分类？',
         body: '我建议把复盘、版本变更、平台建设拆成三类，先不要把全部内容塞进一个大杂烩板块。',
@@ -853,7 +905,7 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
 
     const replyResponse = await request(app)
       .post(`/api/forums/threads/${threadResponse.body.thread.id}/posts`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         body: '后续再接 match 链接时，可以让复盘帖直接引用具体对局。',
         authorKind: 'human',
@@ -863,7 +915,7 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
 
     const nestedReplyResponse = await request(app)
       .post(`/api/forums/threads/${threadResponse.body.thread.id}/posts`)
-      .set('Authorization', `Bearer ${replyingHumanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', replyingHumanCookie)
       .send({
         body: '楼中楼回复可以直接跟在这条评论下面。',
         authorKind: 'human',
@@ -876,7 +928,7 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
 
     const reactionResponse = await request(app)
       .post(`/api/forums/posts/${replyResponse.body.id}/reactions`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         actorKind: 'human',
         actorId: humanRegistration.body.account.id,
@@ -888,7 +940,7 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
 
     const reactionToggleResponse = await request(app)
       .post(`/api/forums/posts/${replyResponse.body.id}/reactions`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         actorKind: 'human',
         actorId: humanRegistration.body.account.id,
@@ -900,7 +952,7 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
 
     const reactionSwitchResponse = await request(app)
       .post(`/api/forums/posts/${replyResponse.body.id}/reactions`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         actorKind: 'human',
         actorId: humanRegistration.body.account.id,
@@ -913,7 +965,7 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
 
     const notificationsResponse = await request(app)
       .get(`/api/platform/humans/${humanRegistration.body.account.id}/notifications`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .expect(200);
 
     assert.equal(notificationsResponse.body.notifications.length, 1);
@@ -921,7 +973,7 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
 
     const readNotificationsResponse = await request(app)
       .post(`/api/platform/humans/${humanRegistration.body.account.id}/notifications/read`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .expect(200);
 
     assert.ok(readNotificationsResponse.body.notifications[0].readAt);
@@ -991,18 +1043,96 @@ test('platform exposes persisted forum boards, thread creation, replies, and rep
       .expect(200);
     assert.equal(reportsResponse.body.reports.some((report: { id: string }) => report.id === reportResponse.body.id), true);
 
-    const moderationResponse = await request(app)
+    const deniedModerationResponse = await request(app)
       .post(`/api/forums/reports/${reportResponse.body.id}/moderation`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         status: 'resolved',
         moderatorKind: 'human',
         moderatorId: humanRegistration.body.account.id,
         resolutionNote: '已确认该举报完成处理'
       })
+      .expect(403);
+    assert.equal(deniedModerationResponse.body.error.includes('permission'), true);
+
+    const adminLogin = await request(app)
+      .post('/api/platform/humans/login')
+      .send({
+        username: 'arena_admin',
+        password: 'arena_admin_2026'
+      })
+      .expect(200);
+    const adminCookie = readSessionCookie(adminLogin);
+
+    const moderationResponse = await request(app)
+      .post(`/api/forums/reports/${reportResponse.body.id}/moderation`)
+      .set('Cookie', adminCookie)
+      .send({
+        status: 'resolved',
+        moderatorKind: 'human',
+        moderatorId: adminLogin.body.account.id,
+        resolutionNote: '已确认该举报完成处理'
+      })
       .expect(200);
     assert.equal(moderationResponse.body.status, 'resolved');
-    assert.equal(moderationResponse.body.moderator.id, humanRegistration.body.account.id);
+    assert.equal(moderationResponse.body.moderator.id, adminLogin.body.account.id);
+
+    const auditResponse = await request(app)
+      .get('/api/forums/moderation/audits?limit=5')
+      .set('Cookie', adminCookie)
+      .expect(200);
+    assert.equal(auditResponse.body.audits.some((entry: { targetId: string }) => entry.targetId === reportResponse.body.id), true);
+
+    const hotTagsResponse = await request(app)
+      .get('/api/forums/tags/hot?limit=5')
+      .expect(200);
+    assert.equal(Array.isArray(hotTagsResponse.body.tags), true);
+    assert.equal(hotTagsResponse.body.tags.includes('phase-2') || hotTagsResponse.body.tags.includes('forum'), true);
+  } finally {
+    isolated.cleanup();
+  }
+});
+
+test('human accounts can update profile fields and rotate password through the account API', async () => {
+  const isolated = createIsolatedPlatform();
+
+  try {
+    const app = createApp(isolated.platform);
+
+    const registration = await request(app)
+      .post('/api/platform/humans')
+      .send({
+        username: 'profile_owner',
+        displayName: 'Profile Owner',
+        password: 'profile_owner_2026',
+        bio: 'Original bio'
+      })
+      .expect(201);
+    const sessionCookie = readSessionCookie(registration);
+
+    const updated = await request(app)
+      .patch(`/api/platform/humans/${registration.body.account.id}/profile`)
+      .set('Cookie', sessionCookie)
+      .send({
+        displayName: 'Updated Owner',
+        bio: 'Updated bio',
+        currentPassword: 'profile_owner_2026',
+        nextPassword: 'profile_owner_next_2026'
+      })
+      .expect(200);
+
+    assert.equal(updated.body.account.displayName, 'Updated Owner');
+    assert.equal(updated.body.account.bio, 'Updated bio');
+
+    const relogin = await request(app)
+      .post('/api/platform/humans/login')
+      .send({
+        username: 'profile_owner',
+        password: 'profile_owner_next_2026'
+      })
+      .expect(200);
+
+    assert.equal(relogin.body.account.displayName, 'Updated Owner');
   } finally {
     isolated.cleanup();
   }
@@ -1027,10 +1157,11 @@ test('platform exposes managed announcements with detail, creation, and pin/arch
         bio: 'Publishes community notices'
       })
       .expect(201);
+    const humanCookie = readSessionCookie(humanRegistration);
 
     const createdAnnouncement = await request(app)
       .post('/api/announcements')
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         title: '社区公告现在接入真实持久化',
         summary: '公告列表、详情与更新不再依赖前端静态数组。',
@@ -1053,7 +1184,7 @@ test('platform exposes managed announcements with detail, creation, and pin/arch
 
     const updatedAnnouncement = await request(app)
       .patch(`/api/announcements/${createdAnnouncement.body.id}`)
-      .set('Authorization', `Bearer ${humanRegistration.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         title: '社区公告已完成托管化收口',
         summary: '公告列表、详情、置顶与归档都已经由后端驱动。',
@@ -1114,10 +1245,11 @@ test('forum threads can anchor strategy discussion to a concrete match', async (
       .post('/api/platform/humans')
       .send({ username: 'anchor_owner', displayName: 'Anchor Owner', password: 'anchor_owner_2026', bio: 'Links matches to forum analysis' })
       .expect(201);
+    const humanCookie = readSessionCookie(human);
 
     const linkedThread = await request(app)
       .post('/api/forums/hybrid/threads')
-      .set('Authorization', `Bearer ${human.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         title: '这场 RPS 开局值得复盘',
         body: '这个帖子直接挂到具体对局，后续搜索和复盘页就能从比赛跳回讨论。',
@@ -1141,7 +1273,7 @@ test('forum threads can anchor strategy discussion to a concrete match', async (
 
     await request(app)
       .post('/api/forums/hybrid/threads')
-      .set('Authorization', `Bearer ${human.body.issuedAuthToken}`)
+      .set('Cookie', humanCookie)
       .send({
         title: '不存在的比赛不能作为复盘锚点',
         body: '如果允许无效比赛链接进入论坛，后续从比赛反查讨论会变得不可信。',
