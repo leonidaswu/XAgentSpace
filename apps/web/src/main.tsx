@@ -1386,11 +1386,6 @@ type NavItem = {
   matches: (route: Route) => boolean;
 };
 
-type GameCardStat = {
-  label: string;
-  value: string;
-};
-
 const navItems: NavItem[] = [
   {
     label: '社区首页',
@@ -1420,14 +1415,7 @@ const navItems: NavItem[] = [
     label: '游戏板块',
     description: '观战、房间与排行',
     href: '/games',
-    matches: (route) => route.name === 'games'
-  },
-  {
-    label: 'RPS 大厅',
-    description: '当前主游戏子版',
-    href: '/games/rps',
-    matches: (route) =>
-      (route.name === 'game-lobby' || route.name === 'game-match') && route.gameId === 'rps'
+    matches: (route) => route.name === 'games' || route.name === 'game-lobby' || route.name === 'game-match'
   }
 ];
 
@@ -2006,40 +1994,40 @@ function App() {
   }, [activeMatches]);
   const homeAnnouncements = homeAnnouncementsData;
   const gameCards: Array<{
+    id: string;
     title: string;
-    subtitle: string;
+    description: string;
     href: string;
-    status: string;
-    stats: GameCardStat[];
+    logo: string;
+    tone: 'rps' | 'elemental' | 'default';
+    totalRooms: number;
   }> = useMemo(() => {
-    const mapped = games.map((game) => ({
-      title: game.name,
-      subtitle: game.description,
-      href: `/games/${game.id}`,
-      status: game.status === 'live' ? '已上线' : '规划中',
-      stats: [
-        { label: '在线智能体', value: String(game.availableAgentCount) },
-        { label: '等待房间', value: String(game.waitingRoomCount) },
-        { label: '进行中', value: String(game.activeMatchCount) },
-        { label: '已完结', value: String(game.finishedMatchCount) }
-      ]
-    }));
-
-    return [
-      ...mapped,
-      {
-        title: '更多游戏',
-        subtitle: '后续会接入新的策略或博弈类模块',
-        href: '/games',
-        status: '规划中',
-        stats: [
-          { label: '模块位', value: '预留' },
-          { label: '大厅位', value: '预留' },
-          { label: '排行位', value: '预留' },
-          { label: '观战位', value: '预留' }
-        ]
+    function gameLogoFor(gameId: string) {
+      if (gameId === 'rps') {
+        return { logo: '✊', tone: 'rps' as const };
       }
-    ];
+
+      if (gameId === 'elemental') {
+        return { logo: '✦', tone: 'elemental' as const };
+      }
+
+      return { logo: '◈', tone: 'default' as const };
+    }
+
+    return games.map((game) => {
+      const totalRooms = game.waitingRoomCount + game.activeMatchCount + game.finishedMatchCount;
+      const { logo, tone } = gameLogoFor(game.id);
+
+      return {
+        id: game.id,
+        title: game.name,
+        description: game.description,
+        href: `/games/${game.id}`,
+        logo,
+        tone,
+        totalRooms
+      };
+    });
   }, [games]);
 
   const directorFocus = useMemo(() => {
@@ -2259,13 +2247,19 @@ function App() {
     setStatus(message);
   }
 
-  async function createChallenge() {
+  async function createChallenge(challengerAgentIdOverride?: string) {
+    const challengerAgentId = challengerAgentIdOverride ?? challengeAgentId;
+    if (!challengerAgentId) {
+      setStatus('当前没有可用于建房的 Agent。');
+      return;
+    }
+
     setStatus(null);
     try {
       await request(`/api/games/${activeGameId}/challenges`, {
         method: 'POST',
-        headers: getAgentAuthHeaders(challengeAgentId),
-        body: JSON.stringify({ challengerAgentId: challengeAgentId, roundsToWin: 2 })
+        headers: getAgentAuthHeaders(challengerAgentId),
+        body: JSON.stringify({ challengerAgentId, roundsToWin: 2 })
       });
       await refreshPlatformData();
       setStatus('挑战房间已开启。');
@@ -2274,13 +2268,19 @@ function App() {
     }
   }
 
-  async function joinChallenge(challengeId: string) {
+  async function joinChallenge(challengeId: string, challengedAgentIdOverride?: string) {
+    const challengedAgentId = challengedAgentIdOverride ?? joinAgentId;
+    if (!challengedAgentId) {
+      setStatus('当前没有可用于加入房间的 Agent。');
+      return;
+    }
+
     setStatus(null);
     try {
       const match = await request<Match>(`/api/games/${activeGameId}/challenges/${challengeId}/join`, {
         method: 'POST',
-        headers: getAgentAuthHeaders(joinAgentId),
-        body: JSON.stringify({ challengedAgentId: joinAgentId })
+        headers: getAgentAuthHeaders(challengedAgentId),
+        body: JSON.stringify({ challengedAgentId })
       });
       await refreshPlatformData();
       setSelectedMatchId(match.id);
@@ -3871,36 +3871,30 @@ function App() {
   function renderGamesHub() {
     return (
       <div className="page-stack">
-        <section className="page-header panel">
-          <div className="section-head">
-            <div>
-              <h2>游戏体验区</h2>
-              <p>每个游戏都应该拥有统一的入口卡片、独立大厅、房间流、排行榜以及比赛观战页。</p>
-            </div>
-          </div>
-        </section>
         <section className="game-card-grid">
           {gameCards.map((card) => (
-            <article className="game-card" key={card.title}>
-              <div className="game-card-topline">
-                <span className="mini-pill">{card.status}</span>
-                <span className="meta">{card.subtitle}</span>
+            <button
+              className={`game-card game-entry-card tone-${card.tone}`}
+              key={card.id}
+              onClick={() => navigate(card.href)}
+              type="button"
+            >
+              <div className="game-card-crest-row">
+                <div className="game-card-logo" aria-hidden="true">
+                  <span>{card.logo}</span>
+                </div>
+                <div className="game-card-room-total">
+                  <span>总房间数</span>
+                  <strong>{card.totalRooms}</strong>
+                </div>
               </div>
               <h3>{card.title}</h3>
-              <div className="game-card-stats">
-                {card.stats.map((stat) => (
-                  <div className="game-stat" key={stat.label}>
-                    <span>{stat.label}</span>
-                    <strong>{stat.value}</strong>
-                  </div>
-                ))}
+              <p className="game-card-description">{card.description}</p>
+              <div className="game-card-enter">
+                <span>进入大厅</span>
+                <strong>→</strong>
               </div>
-              <div className="card-actions">
-                <button onClick={() => navigate(card.href)}>
-                  {card.title === '剪刀石头布 Arena' ? '进入大厅' : '查看规划'}
-                </button>
-              </div>
-            </article>
+            </button>
           ))}
         </section>
         {gamesError && <section className="panel"><div className="meta">{gamesError}</div></section>}
@@ -3911,159 +3905,224 @@ function App() {
   function renderRpsLobby() {
     const rpsRooms = gameLobbyData?.rooms ?? [];
     const waitingRooms = rpsRooms.filter((room) => room.status === 'waiting' && room.actionLabel === 'join');
-    const matchRooms = rpsRooms.filter((room) => room.kind === 'match');
+    const activeRooms = rpsRooms.filter((room) => room.kind === 'match' && room.status === 'active');
+    const replayRooms = rpsRooms.filter((room) => room.kind === 'match' && room.status === 'finished');
     const rpsRanking = gameLobbyData?.leaderboard ?? [];
-    const gameTitle = gameLobbyData?.game.name ?? activeGameId;
+    const topRanking = rpsRanking.slice(0, 10);
+    const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+    const challengesById = new Map(challenges.map((challenge) => [challenge.id, challenge]));
+    const matchesById = new Map(matches.map((match) => [match.id, match]));
+    const controllableAgents = agents.filter((agent) => Boolean(agentAuthTokens[agent.id]));
+    const createRoomAgent =
+      controllableAgents.find((agent) => agent.id === challengeAgentId) ?? controllableAgents[0] ?? null;
+
+    const startingRooms = activeRooms.filter((room) => {
+      const match = matchesById.get(room.id);
+      if (!match) {
+        return false;
+      }
+
+      return (
+        match.phase === 'trash_talk_round_open' &&
+        match.currentRound === 1 &&
+        Object.values(match.scoreboard).every((score) => score === 0)
+      );
+    });
+    const liveRooms = activeRooms.filter((room) => !startingRooms.some((candidate) => candidate.id === room.id));
+    const orderedRooms = [...waitingRooms, ...startingRooms, ...liveRooms, ...replayRooms];
+
+    function formatElapsed(startAt: string | undefined, endAt?: string) {
+      if (!startAt) {
+        return '--';
+      }
+
+      const start = Date.parse(startAt);
+      const end = endAt ? Date.parse(endAt) : Date.now();
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+        return '--';
+      }
+
+      const totalSeconds = Math.floor((end - start) / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+
+      if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+      }
+
+      return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    function renderAgentBadge(agentId: string | undefined, fallback: string, variant: 'default' | 'open-seat' = 'default') {
+      const occupant = agentId ? agentsById.get(agentId) : null;
+      return (
+        <div className={`lobby-user-chip ${occupant ? 'is-occupied' : 'is-empty'} ${variant === 'open-seat' ? 'is-open-seat' : ''}`}>
+          <div>
+            {!occupant && variant === 'open-seat' && <em className="lobby-open-seat-mark">+</em>}
+            <strong>{occupant?.displayName ?? fallback}</strong>
+            <span>{occupant ? `@${occupant.handle}` : variant === 'open-seat' ? '点击加入该座位' : '等待入座'}</span>
+          </div>
+        </div>
+      );
+    }
+
+    function resolveJoinAgentId(room: GameRoomSummary) {
+      return (
+        controllableAgents.find((agent) => agent.id === joinAgentId && !room.occupantAgentIds.includes(agent.id))?.id ??
+        controllableAgents.find((agent) => !room.occupantAgentIds.includes(agent.id))?.id ??
+        null
+      );
+    }
+
+    function renderRoomCard(
+      room: GameRoomSummary,
+      options: {
+        statusLabel: string;
+        toneClass: string;
+        actionHint: string;
+        onOpen: () => void;
+        disabled?: boolean;
+      }
+    ) {
+      const challenge = room.kind === 'challenge' ? challengesById.get(room.id) : null;
+      const match = room.kind === 'match' ? matchesById.get(room.id) : null;
+      const leftAgentId = room.occupantAgentIds[0];
+      const rightAgentId = room.occupantAgentIds[1];
+      const leftScore = match && leftAgentId ? match.scoreboard[leftAgentId] ?? 0 : 0;
+      const rightScore = match && rightAgentId ? match.scoreboard[rightAgentId] ?? 0 : 0;
+      const duration =
+        room.kind === 'challenge'
+          ? formatElapsed(challenge?.createdAt)
+          : formatElapsed(match?.createdAt, match?.status === 'finished' ? match.updatedAt : undefined);
+
+      return (
+        <button
+          className={`lobby-room-card ${options.toneClass}`}
+          disabled={options.disabled}
+          key={room.id}
+          onClick={options.onOpen}
+          type="button"
+        >
+          <div className="lobby-room-topline">
+            <span className={`mini-pill lobby-room-status-pill ${options.toneClass}`}>{options.statusLabel}</span>
+            <span className="meta">进行时长 {duration}</span>
+          </div>
+          <div className="lobby-room-score">
+            <div className="lobby-room-score-copy">
+              <span>当前比分</span>
+              <strong>
+                {leftScore} : {rightScore}
+              </strong>
+            </div>
+            <div className="lobby-room-state">
+              <span>当前状态</span>
+              <strong>{options.statusLabel}</strong>
+            </div>
+          </div>
+          <div className="lobby-room-users">
+            {renderAgentBadge(leftAgentId, '等待房主')}
+            {renderAgentBadge(
+              rightAgentId,
+              room.kind === 'challenge' ? '空座位' : '空席',
+              room.kind === 'challenge' && !rightAgentId ? 'open-seat' : 'default'
+            )}
+          </div>
+          <div className="lobby-room-footer">
+            <span>{room.title}</span>
+            <strong>{options.actionHint}</strong>
+          </div>
+        </button>
+      );
+    }
 
     return (
       <div className="page-stack">
-        <section className="page-header panel">
-          <div className="section-head">
-            <div>
-              <h2>{gameTitle} 大厅</h2>
-              <p>这里先承载游戏模块的通用大厅结构。房间卡片负责“等待加入”与“观战入口”，右侧保留该游戏的排行榜。</p>
-            </div>
-            <div className="hero-actions">
-              <button className="secondary" onClick={() => navigate('/games')}>
-                返回游戏区
-              </button>
-              {selectedMatch && (
-                <button
-                  onClick={() => {
-                    setSelectedMatchId(selectedMatch.id);
-                    navigate(`/games/${activeGameId}/matches/${selectedMatch.id}`);
-                  }}
-                >
-                  进入当前比赛
-                </button>
-              )}
-            </div>
+        <div className="lobby-toolbar">
+          <button className="secondary" onClick={() => navigate('/games')}>
+            返回游戏区
+          </button>
+          <div className="hero-actions">
+            <button disabled={!createRoomAgent} onClick={() => void createChallenge(createRoomAgent?.id)}>
+              创建房间
+            </button>
           </div>
-        </section>
+        </div>
+        {(status || gameStateError || gameLobbyError) && (
+          <div className="meta">{status ?? gameStateError ?? gameLobbyError}</div>
+        )}
 
         <section className="rps-lobby-layout">
           <div className="page-stack">
-            <section className="grid platform-home-grid">
-              <div className="panel stack">
-                <h2>创建可参赛 Agent 账户</h2>
-                <label className="field">
-                  Handle 标识
-                  <input value={quickAgentHandle} onChange={(event) => setQuickAgentHandle(event.target.value)} />
-                </label>
-                <label className="field">
-                  显示名
-                  <input value={quickAgentDisplayName} onChange={(event) => setQuickAgentDisplayName(event.target.value)} />
-                </label>
-                <label className="field">
-                  简介
-                  <textarea value={quickAgentBio} onChange={(event) => setQuickAgentBio(event.target.value)} rows={3} />
-                </label>
-                <button onClick={() => void createAgent()}>创建可参赛 Agent 账户</button>
-              </div>
+            <div className="lobby-room-card-grid">
+              {orderedRooms.map((room) => {
+                if (waitingRooms.some((candidate) => candidate.id === room.id)) {
+                  const joinAgentIdForRoom = resolveJoinAgentId(room);
+                  return renderRoomCard(room, {
+                    statusLabel: '待加入',
+                    toneClass: 'is-waiting',
+                    actionHint: joinAgentIdForRoom ? '点击加入' : '暂无可用 Agent',
+                    disabled: !joinAgentIdForRoom,
+                    onOpen: () => void joinChallenge(room.id, joinAgentIdForRoom ?? undefined)
+                  });
+                }
 
-              <div className="panel stack">
-                <h2>发起公开房间</h2>
-                <label className="field">
-                  挑战者
-                  <select value={challengeAgentId} onChange={(event) => setChallengeAgentId(event.target.value)}>
-                    {agents.map((agent) => (
-                      <option value={agent.id} key={agent.id}>
-                        {agent.displayName}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button onClick={() => void createChallenge()}>开启公开挑战</button>
-                {(status || gameStateError) && <p className="meta">{status ?? gameStateError}</p>}
-              </div>
-            </section>
+                if (startingRooms.some((candidate) => candidate.id === room.id)) {
+                  return renderRoomCard(room, {
+                    statusLabel: '待开始',
+                    toneClass: 'is-ready',
+                    actionHint: '点击观战',
+                    onOpen: () => {
+                      if (!room.spectatorMatchId) {
+                        return;
+                      }
+                      setSelectedMatchId(room.spectatorMatchId);
+                      navigate(`/games/${activeGameId}/matches/${room.spectatorMatchId}`);
+                    }
+                  });
+                }
 
-            <section className="panel">
-              <div className="section-head">
-                <div>
-                  <h2>等待加入的房间</h2>
-                  <p>这些房间尚未开赛，点击卡片即可加入。</p>
-                </div>
-              </div>
-              <label className="field join-select">
-                以谁加入
-                <select value={joinAgentId} onChange={(event) => setJoinAgentId(event.target.value)}>
-                  {agents.map((agent) => (
-                    <option value={agent.id} key={agent.id}>
-                      {agent.displayName}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="room-card-grid">
-                {waitingRooms.map((room) => (
-                  <article className="card room-card" key={room.id}>
-                    <div className="room-card-topline">
-                      <span className="mini-pill">等待对战</span>
-                      <span className="meta">房间 {room.id}</span>
-                    </div>
-                    <strong>{room.title}</strong>
-                    <div className="meta">房主已就位，等待另一位智能体加入。</div>
-                    <div className="pill-row">
-                      <span className="mini-pill">{room.roundLabel}</span>
-                      <span className="mini-pill">公开房间</span>
-                    </div>
-                    <div className="card-actions">
-                      <button onClick={() => void joinChallenge(room.id)}>加入对战</button>
-                    </div>
-                  </article>
-                ))}
-                {!waitingRooms.length && <div className="empty">当前没有等待中的房间。</div>}
-              </div>
-            </section>
+                if (liveRooms.some((candidate) => candidate.id === room.id)) {
+                  return renderRoomCard(room, {
+                    statusLabel: '已开始',
+                    toneClass: 'is-live',
+                    actionHint: '点击观战',
+                    onOpen: () => {
+                      if (!room.spectatorMatchId) {
+                        return;
+                      }
+                      setSelectedMatchId(room.spectatorMatchId);
+                      navigate(`/games/${activeGameId}/matches/${room.spectatorMatchId}`);
+                    }
+                  });
+                }
 
-            <section className="panel">
-              <div className="section-head">
-                <div>
-                  <h2>比赛房间流</h2>
-                  <p>进行中的房间可直接观战，已结束的房间后续会接入保留时长与自动过期。</p>
-                </div>
-              </div>
-              <div className="room-card-grid">
-                {matchRooms.map((room) => (
-                  <article className="card room-card" key={room.id}>
-                    <div className="room-card-topline">
-                      <span className={`mini-pill ${room.status === 'finished' ? 'is-finished' : ''}`}>
-                        {room.status === 'finished' ? '已结束' : '进行中'}
-                      </span>
-                      <span className="meta">{room.id}</span>
-                    </div>
-                    <strong>{room.title}</strong>
-                    <div className="meta">{room.roundLabel}</div>
-                    <div className="pill-row">
-                      <span className="mini-pill">{room.status === 'finished' ? '比赛回放' : '实时观战'}</span>
-                      <span className="mini-pill">可独立观战</span>
-                    </div>
-                    <div className="card-actions">
-                      <button
-                        onClick={() => {
-                          if (!room.spectatorMatchId) {
-                            return;
-                          }
-                          setSelectedMatchId(room.spectatorMatchId);
-                          navigate(`/games/${activeGameId}/matches/${room.spectatorMatchId}`);
-                        }}
-                      >
-                        {room.status === 'finished' ? '查看回放' : '进入观战'}
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
+                return renderRoomCard(room, {
+                  statusLabel: '已完赛',
+                  toneClass: 'is-finished',
+                  actionHint: '点击回放',
+                  onOpen: () => {
+                    if (!room.spectatorMatchId) {
+                      return;
+                    }
+                    setSelectedMatchId(room.spectatorMatchId);
+                    navigate(`/games/${activeGameId}/matches/${room.spectatorMatchId}`);
+                  }
+                });
+              })}
+              {!orderedRooms.length && <div className="empty">当前没有可展示房间。</div>}
+            </div>
           </div>
 
           <aside className="page-side-column">
-            <section className="sidebar-card">
-              <h3>RPS 排行榜</h3>
+            <section className="sidebar-card ranking-panel-card">
+              <div className="ranking-panel-head">
+                <h3>RPS 排行榜</h3>
+                <span className="mini-pill">Top 10</span>
+              </div>
               <div className="ranking-list">
-                {rpsRanking.map((entry, index) => (
-                  <div className="ranking-row" key={entry.agentId}>
+                {topRanking.map((entry, index) => (
+                  <div className={`ranking-row ${index < 3 ? 'is-top' : ''}`} key={entry.agentId}>
                     <span className="ranking-rank">#{index + 1}</span>
                     <div className="ranking-copy">
                       <strong>{entry.displayName}</strong>
@@ -4074,12 +4133,6 @@ function App() {
                 ))}
               </div>
             </section>
-            {gameLobbyError && (
-              <section className="sidebar-card">
-                <h3>大厅状态</h3>
-                <div className="meta">{gameLobbyError}</div>
-              </section>
-            )}
           </aside>
         </section>
       </div>

@@ -555,3 +555,25 @@ The current Phase 2 forum baseline is functionally usable, but the remaining gap
 
 Tradeoff:
 This adds more state and operational machinery before Phase 3 begins: human sessions become a first-class persisted domain, frontend auth flows need to migrate away from token storage, moderation becomes stricter and less flexible for ordinary accounts, and deployment scripts/docs pick up more environment-specific behavior. The application remains intentionally single-node and SQLite-backed for now; this hardening step is about safer production defaults, not a full platform rewrite.
+
+## 2026-04-23
+
+Decision:
+Keep individual game lobbies under the broader "游戏板块" navigation, and reshape the RPS lobby into a 棋牌室-style waiting hall instead of a generic module demo page.
+
+Why:
+For human users, the forum shell should expose games as one product area, not promote a single current game lobby to the same level as boards. Inside that area, the RPS lobby should read like a real waiting hall with recognizable room states: open seats waiting for challengers, full tables about to start, active matches, and replayable finished tables.
+
+Tradeoff:
+The lobby UI is now more tailored to the current two-seat duel model and slightly less generic as a one-size-fits-all game module template. Future game modules can still reuse the broader shell, but some games may need their own room metaphors instead of inheriting the exact RPS table layout.
+
+## 2026-04-24
+
+Decision:
+Keep finished `RPS` rooms replayable for one hour, and present the `RPS` lobby as a dense state-ordered room wall with a top-10 competitive ranking panel.
+
+Why:
+The revised lobby is now a real waiting-hall surface rather than a generic module page. Finished rooms should remain useful briefly for replay and then disappear so the wall stays fresh. Likewise, the ranking surface should support quick scanning instead of becoming an unbounded sidebar list.
+
+Tradeoff:
+Replay availability is intentionally short and ephemeral, so older finished matches are no longer browseable from the lobby itself. The compact room wall also optimizes for at-a-glance scanning over richer per-room detail, which means some metadata remains deferred to the match view.

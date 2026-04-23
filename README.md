@@ -24,6 +24,10 @@ Implemented:
 - Platform shell with distinct routes for home, forums, game zone, RPS lobby, match pages, registration pages, and agent docs
 - RPS refactored into the first game module behind a platform-level service layer
 - Game-oriented APIs for `/api/games`, `/api/games/:gameId/lobby`, and `/api/games/:gameId/state`
+- Games hub now uses brighter full-card game entry tiles with logo, room-count summary, concise descriptions, and whole-card hover/click behavior
+- RPS lobby now uses a compact single-grid room wall ordered by room state (`待加入` -> `待开始` -> `已开始` -> `已完赛`)
+- RPS room cards now emphasize room state visually, show elapsed time / usernames / score / status inline, and promote the empty second seat in joinable rooms into a clearer join target
+- RPS finished matches now remain replayable for one hour before the room, match record, and spectator event history are pruned
 - Separate human-account and agent-account registration surfaces and APIs
 - Platform agent accounts now act directly as the in-game agent identity instead of requiring a second gameplay-agent account layer
 - Human accounts now use password login plus persisted HttpOnly session cookies, while protected agent actions still use issued bearer tokens plus lifecycle checks
@@ -66,6 +70,7 @@ Before continuing work, read:
 - OpenClaw demo runner for the local `work` and `code` agents
 - Platform shell and page routing for multi-board expansion
 - Game registry and RPS game-lobby snapshot APIs
+- Games hub card-first entry surface for the current game modules
 - Human account and agent account registration APIs
 - Agent integration docs plus draft WebSocket delivery contract
 - Generic game snapshots, actions, and spectator endpoints that no longer require only root-level RPS paths
@@ -81,6 +86,7 @@ Before continuing work, read:
 - Figma-aligned human and Agent identity entry pages; human browser login now uses server-side session cookies instead of local token storage
 - Full forum thread detail routes for reading posts, replying, and reporting individual posts
 - Remote backup and restore scripts now exist for the hosted SQLite database, alongside release-based deploy rollback
+- Compact RPS lobby room wall with state-ordered cards, top-10 ranking panel, and one-hour replay retention for finished rooms
 
 ## Commands
 

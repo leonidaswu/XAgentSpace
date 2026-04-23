@@ -24,6 +24,7 @@ import type { PersistedGameModuleState } from '../../game.js';
 
 export const TRASH_TALK_TURNS_PER_AGENT = 3;
 export const TOTAL_TRASH_TALK_TURNS = TRASH_TALK_TURNS_PER_AGENT * 2;
+export const FINISHED_MATCH_REPLAY_WINDOW_MS = 60 * 60 * 1000;
 
 type DuelGameConfig = {
   id: string;
@@ -165,6 +166,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   listChallenges() {
+    this.pruneExpiredFinishedMatches();
     return [...this.challenges.values()];
   }
 
@@ -251,10 +253,12 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   listMatches() {
+    this.pruneExpiredFinishedMatches();
     return [...this.matches.values()];
   }
 
   getMatch(matchId: string) {
+    this.pruneExpiredFinishedMatches();
     return this.matches.get(matchId);
   }
 
@@ -402,6 +406,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   listSpectatorEvents(matchId: string, afterSeq = 0) {
+    this.pruneExpiredFinishedMatches();
     return (this.spectatorEvents.get(matchId) ?? []).filter((event) => event.seq > afterSeq);
   }
 
@@ -420,9 +425,10 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   exportState(): PersistedGameModuleState {
+    this.pruneExpiredFinishedMatches(false);
     return {
-      challenges: clone(this.listChallenges()),
-      matches: clone(this.listMatches()),
+      challenges: clone([...this.challenges.values()]),
+      matches: clone([...this.matches.values()]),
       spectatorEvents: [...this.spectatorEvents.entries()].map(([matchId, events]) => [matchId, clone(events)]),
       agentQueues: [...this.agentQueues.entries()].map(([agentId, events]) => [agentId, clone(events)])
     };
@@ -693,6 +699,31 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     this.emit('state-changed');
   }
 
+  private pruneExpiredFinishedMatches(emitStateChange = true) {
+    const nowMs = Date.now();
+    let removedAny = false;
+
+    for (const match of this.matches.values()) {
+      if (match.status !== 'finished') {
+        continue;
+      }
+
+      const finishedAt = Date.parse(match.updatedAt);
+      if (!Number.isFinite(finishedAt) || nowMs - finishedAt < FINISHED_MATCH_REPLAY_WINDOW_MS) {
+        continue;
+      }
+
+      this.matches.delete(match.id);
+      this.spectatorEvents.delete(match.id);
+      this.challenges.delete(match.challengeId);
+      removedAny = true;
+    }
+
+    if (removedAny && emitStateChange) {
+      this.markStateChanged();
+    }
+  }
+
   private requireAgent(agentId: string) {
     const agent = this.agents.get(agentId);
     if (!agent) {
@@ -702,6 +733,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   private requireChallenge(challengeId: string) {
+    this.pruneExpiredFinishedMatches();
     const challenge = this.challenges.get(challengeId);
     if (!challenge) {
       throw new Error(`Unknown challenge: ${challengeId}`);
@@ -710,6 +742,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   private requireMatch(matchId: string) {
+    this.pruneExpiredFinishedMatches();
     const match = this.matches.get(matchId);
     if (!match) {
       throw new Error(`Unknown match: ${matchId}`);

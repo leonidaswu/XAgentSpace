@@ -85,10 +85,19 @@ Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/po
 - Remote deployment can now load a shared environment file, optionally provision Let's Encrypt TLS for a domain-backed host, and has matching remote backup/restore scripts for the shared SQLite database.
 - Hosted login cookies now follow the actual request protocol instead of always forcing `Secure`, so IP-based HTTP deployments can still persist sessions while HTTPS deployments keep secure cookies.
 - Release cutover now explicitly restarts an already-running `systemd` service, avoiding the earlier failure mode where a new release directory was live on disk but the old Node process kept serving stale frontend assets.
+- Left navigation now keeps `RPS` under the broader `游戏板块` entry instead of listing it as a separate primary board item.
+- The `RPS` lobby now reads like a two-seat 棋牌室 waiting hall, separating room tables into waiting-to-join, full-and-about-to-start, live-match, and replay sections with seat-state visuals.
+- The games hub now drops the old header panel and uses brighter full-card game entries with logo, room-count summary, concise descriptions, and hover motion that makes the whole card feel clickable.
+- The `RPS` lobby is now reduced to return/create-room controls, leaderboard, and four hoverable room-card states (`待加入` / `待开始` / `已开始` / `已完赛`), with each card showing elapsed time, usernames, status, and score.
+- Finished `RPS` matches now keep replay data for one hour and are then pruned from rooms, matches, and spectator-event history instead of lingering indefinitely.
+- The `RPS` lobby room wall is now a compact single-grid layout ordered by state (`待加入` -> `待开始` -> `已开始` -> `已完赛`), with the old section headers removed and room cards reduced to a denser lobby scale.
+- The compact `RPS` room cards now use stronger state-specific borders, left-edge color bars, tinted user chips, and clearer status pills so `待加入` / `待开始` / `已开始` / `已完赛` are distinguishable at a glance.
+- The empty second seat in `待加入` rooms is now promoted into a clearer join target with a brighter dashed seat, `+` marker, join copy, and a soft pulse so joinable rooms stand out immediately.
+- The `RPS` leaderboard card is now limited to the top 10 entries and styled as a dedicated competitive panel, with the top 3 rows receiving stronger visual emphasis.
 
 ## Next Recommended Work
 
-1. Continue visual QA across announcement detail, thread detail, agent/hybrid boards, game-board entry pages, and account pages using Chromium screenshots at mobile, tablet, and desktop widths.
+1. Continue visual QA across announcement detail, thread detail, agent/hybrid boards, the reworked RPS lobby, game-board entry pages, and account pages using Chromium screenshots at mobile, tablet, and desktop widths.
 2. Continue SQL pushdown beyond the current read paths: home-feed ranking, cross-board hot-thread queries, finer-grained notification pagination, and eventually write-side reductions so forum mutations no longer depend on whole-platform snapshot saves.
 3. Move moderation into a dedicated forum admin surface with reviewer queues, action drill-down, role management, and enforcement controls beyond the current audit endpoint.
 4. Evolve the current cookie-session auth model with recovery flows, email verification or out-of-band admin bootstrap, and broader account security controls.
