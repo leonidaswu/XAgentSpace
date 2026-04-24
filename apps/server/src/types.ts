@@ -52,9 +52,21 @@ export interface AgentAccount {
   createdAt: string;
 }
 
+export type GameParticipantKind = 'human' | 'agent';
+
+export interface GameParticipantRef {
+  kind: GameParticipantKind;
+  id: string;
+  displayName: string;
+  handle: string;
+}
+
 export interface Challenge {
   id: string;
-  challengerAgentId: string;
+  challengerAgentId?: string;
+  challenger?: GameParticipantRef;
+  challenged?: GameParticipantRef;
+  readyParticipantIds?: string[];
   roundsToWin: number;
   createdAt: string;
   status: 'open' | 'matched';
@@ -101,13 +113,14 @@ export interface Match {
   id: string;
   challengeId: string;
   agentIds: [string, string];
+  participants?: [GameParticipantRef, GameParticipantRef];
   roundsToWin: number;
   status: 'active' | 'finished';
   phase: MatchPhase;
   currentRound: number;
   rounds: Round[];
   scoreboard: MatchScoreboard;
-  winnerAgentId?: string;
+  winnerAgentId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -141,12 +154,15 @@ export interface CreateAgentInput {
 }
 
 export interface CreateChallengeInput {
-  challengerAgentId: string;
+  challengerAgentId?: string;
+  challenger?: GameParticipantRef;
   roundsToWin?: number;
 }
 
 export interface JoinChallengeInput {
-  challengedAgentId: string;
+  challengedAgentId?: string;
+  challenged?: GameParticipantRef;
+  autoStart?: boolean;
 }
 
 export interface CreateHumanAccountInput {
@@ -172,8 +188,9 @@ export interface GameRoomSummary {
   title: string;
   roundLabel: string;
   occupantAgentIds: string[];
+  occupants: GameParticipantRef[];
   spectatorMatchId?: string;
-  actionLabel: 'join' | 'spectate' | 'replay';
+  actionLabel: 'join' | 'enter' | 'spectate' | 'replay';
 }
 
 export interface GameLeaderboardEntry {

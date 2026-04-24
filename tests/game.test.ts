@@ -117,6 +117,37 @@ test('game engine progresses from trash talk to commit to reveal and scores a ro
   assert.equal(finished?.scoreboard[alpha.id], 1);
 });
 
+test('game engine finishes as a draw after five consecutive drawn rounds', () => {
+  const engine = new GameEngine();
+  const alpha = engine.createAgent({ handle: 'draw_a', displayName: 'Draw A' });
+  const beta = engine.createAgent({ handle: 'draw_b', displayName: 'Draw B' });
+  const challenge = engine.createChallenge({ challengerAgentId: alpha.id, roundsToWin: 2 });
+  const match = engine.joinChallenge(challenge.id, { challengedAgentId: beta.id });
+  const moves = ['rock', 'paper', 'scissors', 'rock', 'paper'];
+
+  for (const [roundIndex, move] of moves.entries()) {
+    for (let turn = 0; turn < TOTAL_TRASH_TALK_TURNS; turn += 1) {
+      const agentId = turn % 2 === 0 ? alpha.id : beta.id;
+      engine.submitTrashTalk(match.id, agentId, `draw-${roundIndex + 1}-${turn + 1}`);
+    }
+
+    const leftNonce = `left-${roundIndex}`;
+    const rightNonce = `right-${roundIndex}`;
+    engine.submitCommit(match.id, alpha.id, commitmentFor(move, leftNonce));
+    engine.submitCommit(match.id, beta.id, commitmentFor(move, rightNonce));
+    engine.submitReveal(match.id, alpha.id, move, leftNonce);
+    engine.submitReveal(match.id, beta.id, move, rightNonce);
+  }
+
+  const finished = engine.getMatch(match.id);
+  assert.equal(finished?.status, 'finished');
+  assert.equal(finished?.phase, 'match_finished');
+  assert.equal(finished?.winnerAgentId, undefined);
+  assert.equal(finished?.scoreboard[alpha.id], 0);
+  assert.equal(finished?.scoreboard[beta.id], 0);
+  assert.equal(finished?.rounds.length, 5);
+});
+
 test('open challenges are discoverable through agent queues', () => {
   const engine = new GameEngine();
   const challenger = engine.createAgent({ handle: 'nova', displayName: 'Nova' });
@@ -190,6 +221,135 @@ test('platform exposes generic game endpoints', async () => {
 
     const eventsResponse = await request(app).get(`/api/games/rps/matches/${matchResponse.body.id}/events`).expect(200);
     assert.ok(Array.isArray(eventsResponse.body));
+  } finally {
+    isolated.cleanup();
+  }
+});
+
+test('game rooms accept human and agent participants', async () => {
+  const isolated = createIsolatedPlatform();
+
+  try {
+    const app = createApp(isolated.platform);
+    const human = await request(app)
+      .post('/api/platform/humans')
+      .send({ username: 'human_rps_one', displayName: 'Human RPS One', password: 'human_rps_one_2026' })
+      .expect(201);
+    const humanCookie = readSessionCookie(human);
+
+    const agent = await request(app)
+      .post('/api/games/rps/agents')
+      .send({ handle: 'mixed_rps_bot', displayName: 'Mixed RPS Bot' })
+      .expect(201);
+
+    const challenge = await request(app)
+      .post('/api/games/rps/challenges')
+      .set('Cookie', humanCookie)
+      .send({ challengerKind: 'human', challengerId: human.body.account.id, roundsToWin: 1 })
+      .expect(201);
+
+    assert.equal(challenge.body.challenger.kind, 'human');
+    assert.equal(challenge.body.challenger.id, human.body.account.id);
+
+    const joinedRoom = await request(app)
+      .post(`/api/games/rps/challenges/${challenge.body.id}/join`)
+      .set('Authorization', `Bearer ${agent.body.issuedAuthToken}`)
+      .send({ challengedKind: 'agent', challengedId: agent.body.account.id })
+      .expect(201);
+
+    assert.deepEqual(
+      [joinedRoom.body.challenger, joinedRoom.body.challenged].map((participant: { kind: string }) => participant.kind),
+      ['human', 'agent']
+    );
+
+    await request(app)
+      .post(`/api/games/rps/challenges/${challenge.body.id}/ready`)
+      .set('Cookie', humanCookie)
+      .send({ actorKind: 'human', actorId: human.body.account.id })
+      .expect(200);
+
+    const match = await request(app)
+      .post(`/api/games/rps/challenges/${challenge.body.id}/ready`)
+      .set('Authorization', `Bearer ${agent.body.issuedAuthToken}`)
+      .send({ actorKind: 'agent', actorId: agent.body.account.id })
+      .expect(200);
+
+    assert.equal(match.body.status, 'active');
+    assert.deepEqual(
+      match.body.participants.map((participant: { kind: string }) => participant.kind),
+      ['human', 'agent']
+    );
+
+    for (let turn = 0; turn < TOTAL_TRASH_TALK_TURNS; turn += 1) {
+      const humanTurn = turn % 2 === 0;
+      await request(app)
+        .post(`/api/games/rps/matches/${match.body.id}/trash-talk`)
+        .set(humanTurn ? 'Cookie' : 'Authorization', humanTurn ? humanCookie : `Bearer ${agent.body.issuedAuthToken}`)
+        .send({
+          actorKind: humanTurn ? 'human' : 'agent',
+          actorId: humanTurn ? human.body.account.id : agent.body.account.id,
+          text: `mixed-line-${turn + 1}`
+        })
+        .expect(201);
+    }
+
+    await request(app)
+      .post(`/api/games/rps/matches/${match.body.id}/commit`)
+      .set('Cookie', humanCookie)
+      .send({ actorKind: 'human', actorId: human.body.account.id, commitment: commitmentFor('rock', 'human-nonce') })
+      .expect(201);
+    await request(app)
+      .post(`/api/games/rps/matches/${match.body.id}/commit`)
+      .set('Authorization', `Bearer ${agent.body.issuedAuthToken}`)
+      .send({ actorKind: 'agent', actorId: agent.body.account.id, commitment: commitmentFor('scissors', 'agent-nonce') })
+      .expect(201);
+    await request(app)
+      .post(`/api/games/rps/matches/${match.body.id}/reveal`)
+      .set('Cookie', humanCookie)
+      .send({ actorKind: 'human', actorId: human.body.account.id, move: 'rock', nonce: 'human-nonce' })
+      .expect(201);
+    await request(app)
+      .post(`/api/games/rps/matches/${match.body.id}/reveal`)
+      .set('Authorization', `Bearer ${agent.body.issuedAuthToken}`)
+      .send({ actorKind: 'agent', actorId: agent.body.account.id, move: 'scissors', nonce: 'agent-nonce' })
+      .expect(201);
+
+    const finished = await request(app).get(`/api/games/rps/matches/${match.body.id}`).expect(200);
+    assert.equal(finished.body.match.status, 'finished');
+    assert.equal(finished.body.match.winnerAgentId, human.body.account.id);
+
+    const secondHuman = await request(app)
+      .post('/api/platform/humans')
+      .send({ username: 'human_rps_two', displayName: 'Human RPS Two', password: 'human_rps_two_2026' })
+      .expect(201);
+    const secondHumanCookie = readSessionCookie(secondHuman);
+    const humanChallenge = await request(app)
+      .post('/api/games/rps/challenges')
+      .set('Cookie', humanCookie)
+      .send({ challengerKind: 'human', challengerId: human.body.account.id, roundsToWin: 1 })
+      .expect(201);
+    const humanRoom = await request(app)
+      .post(`/api/games/rps/challenges/${humanChallenge.body.id}/join`)
+      .set('Cookie', secondHumanCookie)
+      .send({ challengedKind: 'human', challengedId: secondHuman.body.account.id })
+      .expect(201);
+
+    assert.deepEqual(
+      [humanRoom.body.challenger, humanRoom.body.challenged].map((participant: { kind: string }) => participant.kind),
+      ['human', 'human']
+    );
+
+    const abandonedChallenge = await request(app)
+      .post('/api/games/rps/challenges')
+      .set('Cookie', humanCookie)
+      .send({ challengerKind: 'human', challengerId: human.body.account.id, roundsToWin: 1 })
+      .expect(201);
+    const leaveResponse = await request(app)
+      .post(`/api/games/rps/challenges/${abandonedChallenge.body.id}/leave`)
+      .set('Cookie', humanCookie)
+      .send({ actorKind: 'human', actorId: human.body.account.id })
+      .expect(200);
+    assert.equal(leaveResponse.body.dissolved, true);
   } finally {
     isolated.cleanup();
   }

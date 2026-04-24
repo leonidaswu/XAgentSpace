@@ -9,6 +9,7 @@ import type {
   GameLeaderboardEntry,
   GameLobbySnapshot,
   GameMoveOption,
+  GameParticipantRef,
   GameRoomSummary,
   GameStateSnapshot,
   GameSummary,
@@ -24,6 +25,7 @@ import type { PersistedGameModuleState } from '../../game.js';
 
 export const TRASH_TALK_TURNS_PER_AGENT = 3;
 export const TOTAL_TRASH_TALK_TURNS = TRASH_TALK_TURNS_PER_AGENT * 2;
+export const MAX_CONSECUTIVE_DRAW_ROUNDS = 5;
 export const FINISHED_MATCH_REPLAY_WINDOW_MS = 60 * 60 * 1000;
 
 type DuelGameConfig = {
@@ -108,7 +110,8 @@ export class CommitRevealDuelGameModule extends EventEmitter {
 
     if (!alreadyKnown) {
       for (const challenge of this.challenges.values()) {
-        if (challenge.status !== 'open' || challenge.challengerAgentId === agent.id) {
+        const challenger = this.challengeParticipant(challenge);
+        if (challenge.status !== 'open' || (challenger.kind === 'agent' && challenger.id === agent.id)) {
           continue;
         }
 
@@ -116,7 +119,8 @@ export class CommitRevealDuelGameModule extends EventEmitter {
           type: 'challenge_received',
           payload: {
             challengeId: challenge.id,
-            challengerAgentId: challenge.challengerAgentId,
+            challengerAgentId: challenger.kind === 'agent' ? challenger.id : undefined,
+            challenger,
             roundsToWin: challenge.roundsToWin
           }
         });
@@ -135,10 +139,12 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   createChallenge(input: CreateChallengeInput) {
-    const agent = this.requireAgent(input.challengerAgentId);
+    const challenger = this.resolveParticipant(input.challenger, input.challengerAgentId, 'challenger');
     const challenge: Challenge = {
       id: createId('challenge'),
-      challengerAgentId: agent.id,
+      challengerAgentId: challenger.kind === 'agent' ? challenger.id : undefined,
+      challenger,
+      readyParticipantIds: [],
       roundsToWin: input.roundsToWin ?? 2,
       createdAt: now(),
       status: 'open'
@@ -147,7 +153,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     this.challenges.set(challenge.id, challenge);
 
     for (const otherAgent of this.agents.values()) {
-      if (otherAgent.id === challenge.challengerAgentId) {
+      if (challenger.kind === 'agent' && otherAgent.id === challenger.id) {
         continue;
       }
 
@@ -155,7 +161,8 @@ export class CommitRevealDuelGameModule extends EventEmitter {
         type: 'challenge_received',
         payload: {
           challengeId: challenge.id,
-          challengerAgentId: challenge.challengerAgentId,
+          challengerAgentId: challenger.kind === 'agent' ? challenger.id : undefined,
+          challenger,
           roundsToWin: challenge.roundsToWin
         }
       });
@@ -170,16 +177,91 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     return [...this.challenges.values()];
   }
 
-  joinChallenge(challengeId: string, input: JoinChallengeInput) {
+  joinChallenge(challengeId: string, input: JoinChallengeInput & { autoStart: false }): Challenge;
+  joinChallenge(challengeId: string, input: JoinChallengeInput): Match;
+  joinChallenge(challengeId: string, input: JoinChallengeInput): Challenge | Match {
     const challenge = this.requireChallenge(challengeId);
-    const challenged = this.requireAgent(input.challengedAgentId);
+    const challenger = this.challengeParticipant(challenge);
+    const challenged = this.resolveParticipant(input.challenged, input.challengedAgentId, 'challenged');
 
     if (challenge.status !== 'open') {
       throw new Error('Challenge is no longer open');
     }
 
-    if (challenge.challengerAgentId === challenged.id) {
-      throw new Error('Agent cannot join its own challenge');
+    if (challenger.kind === challenged.kind && challenger.id === challenged.id) {
+      throw new Error('Participant cannot join their own challenge');
+    }
+
+    if (challenge.challenged && challenge.challenged.id !== challenged.id) {
+      throw new Error('Challenge already has a second participant');
+    }
+
+    const shouldAutoStart = input.autoStart !== false && challenger.kind === 'agent' && challenged.kind === 'agent';
+    if (!shouldAutoStart) {
+      challenge.challenged = challenged;
+      challenge.readyParticipantIds = (challenge.readyParticipantIds ?? []).filter((participantId) =>
+        [challenger.id, challenged.id].includes(participantId)
+      );
+      this.markStateChanged();
+      return challenge;
+    }
+
+    challenge.challenged = challenged;
+    return this.startChallengeMatch(challenge);
+  }
+
+  readyChallenge(challengeId: string, participant: GameParticipantRef) {
+    const challenge = this.requireChallenge(challengeId);
+    const participants = this.challengeParticipants(challenge);
+
+    if (challenge.status !== 'open') {
+      throw new Error('Challenge is no longer open');
+    }
+
+    if (!participants.some((candidate) => candidate.kind === participant.kind && candidate.id === participant.id)) {
+      throw new Error('Participant is not part of the challenge');
+    }
+
+    const ready = new Set(challenge.readyParticipantIds ?? []);
+    ready.add(participant.id);
+    challenge.readyParticipantIds = [...ready];
+
+    if (participants.length === 2 && participants.every((candidate) => ready.has(candidate.id))) {
+      return this.startChallengeMatch(challenge);
+    }
+
+    this.markStateChanged();
+    return challenge;
+  }
+
+  leaveChallenge(challengeId: string, participant: GameParticipantRef) {
+    const challenge = this.requireChallenge(challengeId);
+    const challenger = this.challengeParticipant(challenge);
+
+    if (challenge.status !== 'open') {
+      throw new Error('Challenge is no longer open');
+    }
+
+    if (challenger.kind === participant.kind && challenger.id === participant.id) {
+      this.challenges.delete(challenge.id);
+      this.markStateChanged();
+      return null;
+    }
+
+    if (challenge.challenged?.kind === participant.kind && challenge.challenged.id === participant.id) {
+      challenge.challenged = undefined;
+      challenge.readyParticipantIds = (challenge.readyParticipantIds ?? []).filter((participantId) => participantId !== participant.id);
+      this.markStateChanged();
+      return challenge;
+    }
+
+    throw new Error('Participant is not part of the challenge');
+  }
+
+  private startChallengeMatch(challenge: Challenge) {
+    const [challenger, challenged] = this.challengeParticipants(challenge);
+    if (!challenged) {
+      throw new Error('Challenge needs two participants before starting');
     }
 
     challenge.status = 'matched';
@@ -199,14 +281,15 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     const match: Match = {
       id: matchId,
       challengeId: challenge.id,
-      agentIds: [challenge.challengerAgentId, challenged.id],
+      agentIds: [challenger.id, challenged.id],
+      participants: [challenger, challenged],
       roundsToWin: challenge.roundsToWin,
       status: 'active',
       phase: 'trash_talk_round_open',
       currentRound: 1,
       rounds: [firstRound],
       scoreboard: {
-        [challenge.challengerAgentId]: 0,
+        [challenger.id]: 0,
         [challenged.id]: 0
       },
       createdAt,
@@ -221,6 +304,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       matchId: match.id,
       challengeId: challenge.id,
       agentIds: match.agentIds,
+      participants: match.participants,
       gameId: this.id
     });
     this.broadcastSpectator(match.id, 'phase_changed', {
@@ -228,13 +312,15 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       roundNumber: match.currentRound
     });
 
-    for (const agentId of match.agentIds) {
+    for (const agentId of this.agentParticipantIds(match)) {
+      const matchParticipants = this.matchParticipants(match);
       this.pushAgentEvent(agentId, {
         type: 'match_started',
         payload: {
           matchId: match.id,
           challengeId: challenge.id,
-          opponentAgentId: match.agentIds.find((value) => value !== agentId),
+          opponentAgentId: matchParticipants.find((value) => value.id !== agentId && value.kind === 'agent')?.id,
+          opponent: matchParticipants.find((value) => value.id !== agentId),
           gameId: this.id
         }
       });
@@ -270,15 +356,16 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       throw new Error('Trash talk is closed');
     }
 
-    if (!match.agentIds.includes(agentId)) {
-      throw new Error('Agent is not part of the match');
+    if (!this.matchParticipantIds(match).includes(agentId)) {
+      throw new Error('Participant is not part of the match');
     }
 
     if (round.trashTalk.length >= TOTAL_TRASH_TALK_TURNS) {
       throw new Error('Trash talk quota reached');
     }
 
-    const expectedAgentId = match.agentIds[round.trashTalk.length % match.agentIds.length];
+    const participantIds = this.matchParticipantIds(match);
+    const expectedAgentId = participantIds[round.trashTalk.length % participantIds.length];
     if (agentId !== expectedAgentId) {
       throw new Error(`It is not ${agentId}'s turn to speak`);
     }
@@ -298,11 +385,12 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     this.broadcastSpectator(match.id, 'trash_talk_sent', {
       roundNumber: round.number,
       agentId,
+      participant: this.participantForId(match, agentId),
       text,
       createdAt: message.createdAt
     });
 
-    const opponentAgentId = match.agentIds.find((value) => value !== agentId);
+    const opponentAgentId = this.agentParticipantIds(match).find((value) => value !== agentId);
     if (opponentAgentId) {
       this.pushAgentEvent(opponentAgentId, {
         type: 'opponent_trash_talk',
@@ -332,6 +420,10 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       throw new Error('Move commitment is closed');
     }
 
+    if (!this.matchParticipantIds(match).includes(agentId)) {
+      throw new Error('Participant is not part of the match');
+    }
+
     if (round.commits[agentId]) {
       throw new Error('Commitment already submitted');
     }
@@ -345,10 +437,11 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     this.broadcastSpectator(match.id, 'move_committed', {
       roundNumber: round.number,
       agentId,
+      participant: this.participantForId(match, agentId),
       submittedAgents: Object.keys(round.commits)
     });
 
-    if (Object.keys(round.commits).length === match.agentIds.length) {
+    if (Object.keys(round.commits).length === this.matchParticipantIds(match).length) {
       this.advancePhase(match, 'move_reveal');
     } else {
       this.markStateChanged();
@@ -367,6 +460,10 @@ export class CommitRevealDuelGameModule extends EventEmitter {
 
     if (match.phase !== 'move_reveal') {
       throw new Error('Move reveal is closed');
+    }
+
+    if (!this.matchParticipantIds(match).includes(agentId)) {
+      throw new Error('Participant is not part of the match');
     }
 
     const commit = round.commits[agentId];
@@ -393,10 +490,11 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     this.broadcastSpectator(match.id, 'move_revealed', {
       roundNumber: round.number,
       agentId,
+      participant: this.participantForId(match, agentId),
       move
     });
 
-    if (Object.keys(round.reveals).length === match.agentIds.length) {
+    if (Object.keys(round.reveals).length === this.matchParticipantIds(match).length) {
       this.scoreRound(match);
     } else {
       this.markStateChanged();
@@ -470,29 +568,34 @@ export class CommitRevealDuelGameModule extends EventEmitter {
   }
 
   lobbySnapshot(): GameLobbySnapshot {
-    const agentsById = new Map(this.listAgents().map((agent) => [agent.id, agent]));
     const rooms: GameRoomSummary[] = [
       ...this.listChallenges()
         .filter((challenge) => challenge.status === 'open')
-        .map((challenge) => ({
-          id: challenge.id,
-          kind: 'challenge' as const,
-          status: 'waiting' as const,
-          gameId: this.id,
-          title: `${agentsById.get(challenge.challengerAgentId)?.displayName ?? challenge.challengerAgentId} 的${this.roomTitleSuffix}`,
-          roundLabel: `先赢 ${challenge.roundsToWin} 回合`,
-          occupantAgentIds: [challenge.challengerAgentId],
-          spectatorMatchId: challenge.matchId,
-          actionLabel: 'join' as const
-        })),
+        .map((challenge) => {
+          const occupants = this.challengeParticipants(challenge);
+          const readyCount = new Set(challenge.readyParticipantIds ?? []).size;
+          return {
+            id: challenge.id,
+            kind: 'challenge' as const,
+            status: 'waiting' as const,
+            gameId: this.id,
+            title: `${this.challengeParticipant(challenge).displayName} 的${this.roomTitleSuffix}`,
+            roundLabel: occupants.length === 2 ? `${readyCount}/2 已准备` : `先赢 ${challenge.roundsToWin} 回合`,
+            occupantAgentIds: occupants.map((participant) => participant.id),
+            occupants,
+            spectatorMatchId: challenge.matchId,
+            actionLabel: occupants.length >= 2 ? 'enter' as const : 'join' as const
+          };
+        }),
       ...this.listMatches().map((match) => ({
         id: match.id,
         kind: 'match' as const,
         status: match.status === 'finished' ? 'finished' as const : 'active' as const,
         gameId: this.id,
-        title: match.agentIds.map((agentId) => agentsById.get(agentId)?.displayName ?? agentId).join(' vs '),
+        title: this.matchParticipants(match).map((participant) => participant.displayName).join(' vs '),
         roundLabel: `${match.phase} · round ${match.currentRound}`,
-        occupantAgentIds: [...match.agentIds],
+        occupantAgentIds: [...this.matchParticipantIds(match)],
+        occupants: this.matchParticipants(match),
         spectatorMatchId: match.id,
         actionLabel: match.status === 'finished' ? 'replay' as const : 'spectate' as const
       }))
@@ -500,9 +603,13 @@ export class CommitRevealDuelGameModule extends EventEmitter {
 
     const wins = new Map<string, number>();
     const played = new Map<string, number>();
+    const humansById = new Map<string, GameParticipantRef>();
     for (const match of this.listMatches()) {
-      for (const agentId of match.agentIds) {
-        played.set(agentId, (played.get(agentId) ?? 0) + 1);
+      for (const participant of this.matchParticipants(match)) {
+        played.set(participant.id, (played.get(participant.id) ?? 0) + 1);
+        if (participant.kind === 'human') {
+          humansById.set(participant.id, participant);
+        }
       }
 
       if (match.winnerAgentId) {
@@ -511,12 +618,14 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     }
 
     const leaderboard: GameLeaderboardEntry[] = this.listAgents()
-      .map((agent) => {
-        const matchCount = played.get(agent.id) ?? 0;
-        const winCount = wins.get(agent.id) ?? 0;
+      .map((agent) => this.participantFromAgent(agent))
+      .concat([...humansById.values()])
+      .map((participant) => {
+        const matchCount = played.get(participant.id) ?? 0;
+        const winCount = wins.get(participant.id) ?? 0;
         return {
-          agentId: agent.id,
-          displayName: agent.displayName,
+          agentId: participant.id,
+          displayName: participant.displayName,
           wins: winCount,
           matches: matchCount,
           score: winCount * 3 + matchCount
@@ -533,7 +642,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
 
   private scoreRound(match: Match) {
     const round = this.currentRound(match);
-    const [leftId, rightId] = match.agentIds;
+    const [leftId, rightId] = this.matchParticipantIds(match);
     const leftReveal = round.reveals[leftId];
     const rightReveal = round.reveals[rightId];
 
@@ -561,13 +670,14 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       roundNumber: round.number,
       scoreboard: { ...match.scoreboard },
       winnerAgentId: round.winnerAgentId,
+      winner: round.winnerAgentId ? this.participantForId(match, round.winnerAgentId) : null,
       reveals: {
         [leftId]: leftReveal.move,
         [rightId]: rightReveal.move
       }
     });
 
-    for (const agentId of match.agentIds) {
+    for (const agentId of this.agentParticipantIds(match)) {
       this.pushAgentEvent(agentId, {
         type: 'round_result',
         payload: {
@@ -579,7 +689,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       });
     }
 
-    const matchWinner = match.agentIds.find((agentId) => match.scoreboard[agentId] >= match.roundsToWin);
+    const matchWinner = this.matchParticipantIds(match).find((agentId) => match.scoreboard[agentId] >= match.roundsToWin);
     if (matchWinner) {
       match.status = 'finished';
       match.phase = 'match_finished';
@@ -587,14 +697,44 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       this.broadcastSpectator(match.id, 'match_finished', {
         matchId: match.id,
         winnerAgentId: matchWinner,
+        winner: this.participantForId(match, matchWinner),
         scoreboard: { ...match.scoreboard }
       });
-      for (const agentId of match.agentIds) {
+      for (const agentId of this.agentParticipantIds(match)) {
         this.pushAgentEvent(agentId, {
           type: 'match_finished',
           payload: {
             matchId: match.id,
             winnerAgentId: matchWinner,
+            scoreboard: { ...match.scoreboard }
+          }
+        });
+      }
+      this.markStateChanged();
+      return;
+    }
+
+    const consecutiveDraws = this.countTrailingDrawRounds(match);
+    if (consecutiveDraws >= MAX_CONSECUTIVE_DRAW_ROUNDS) {
+      match.status = 'finished';
+      match.phase = 'match_finished';
+      match.winnerAgentId = undefined;
+      this.broadcastSpectator(match.id, 'match_finished', {
+        matchId: match.id,
+        winnerAgentId: null,
+        winner: null,
+        drawReason: 'max_consecutive_draws',
+        consecutiveDraws,
+        scoreboard: { ...match.scoreboard }
+      });
+      for (const agentId of this.agentParticipantIds(match)) {
+        this.pushAgentEvent(agentId, {
+          type: 'match_finished',
+          payload: {
+            matchId: match.id,
+            winnerAgentId: null,
+            drawReason: 'max_consecutive_draws',
+            consecutiveDraws,
             scoreboard: { ...match.scoreboard }
           }
         });
@@ -618,6 +758,18 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     this.advancePhase(match, 'trash_talk_round_open');
   }
 
+  private countTrailingDrawRounds(match: Match) {
+    let count = 0;
+    for (let index = match.rounds.length - 1; index >= 0; index -= 1) {
+      const round = match.rounds[index];
+      if (round.phase !== 'round_result' || round.winnerAgentId !== null) {
+        break;
+      }
+      count += 1;
+    }
+    return count;
+  }
+
   private advancePhase(match: Match, phase: MatchPhase) {
     const round = this.currentRound(match);
     round.phase = phase;
@@ -629,7 +781,7 @@ export class CommitRevealDuelGameModule extends EventEmitter {
       roundNumber: round.number
     });
 
-    for (const agentId of match.agentIds) {
+    for (const agentId of this.agentParticipantIds(match)) {
       this.pushAgentEvent(agentId, {
         type: 'phase_changed',
         payload: {
@@ -641,6 +793,85 @@ export class CommitRevealDuelGameModule extends EventEmitter {
     }
 
     this.markStateChanged();
+  }
+
+  private resolveParticipant(participant: GameParticipantRef | undefined, legacyAgentId: string | undefined, label: string) {
+    if (participant) {
+      const normalized: GameParticipantRef = {
+        kind: participant.kind,
+        id: participant.id.trim(),
+        displayName: participant.displayName.trim(),
+        handle: participant.handle.trim()
+      };
+      if (normalized.kind !== 'agent' && normalized.kind !== 'human') {
+        throw new Error(`Unsupported ${label} participant kind`);
+      }
+      if (!normalized.id || !normalized.displayName || !normalized.handle) {
+        throw new Error(`${label} participant id, displayName, and handle are required`);
+      }
+      if (normalized.kind === 'agent') {
+        const agent = this.requireAgent(normalized.id);
+        return this.participantFromAgent(agent);
+      }
+      return normalized;
+    }
+
+    if (!legacyAgentId) {
+      throw new Error(`${label} participant is required`);
+    }
+
+    return this.participantFromAgent(this.requireAgent(legacyAgentId));
+  }
+
+  private participantFromAgent(agent: AgentAccount): GameParticipantRef {
+    return {
+      kind: 'agent',
+      id: agent.id,
+      displayName: agent.displayName,
+      handle: agent.handle
+    };
+  }
+
+  private fallbackParticipant(id: string): GameParticipantRef {
+    const agent = this.agents.get(id);
+    if (agent) {
+      return this.participantFromAgent(agent);
+    }
+    return {
+      kind: 'agent',
+      id,
+      displayName: id,
+      handle: id
+    };
+  }
+
+  private challengeParticipant(challenge: Challenge): GameParticipantRef {
+    return challenge.challenger ?? this.fallbackParticipant(challenge.challengerAgentId ?? '');
+  }
+
+  private challengeParticipants(challenge: Challenge): GameParticipantRef[] {
+    return [this.challengeParticipant(challenge), challenge.challenged].filter(Boolean) as GameParticipantRef[];
+  }
+
+  private matchParticipants(match: Match): [GameParticipantRef, GameParticipantRef] {
+    if (match.participants?.length === 2) {
+      return [match.participants[0], match.participants[1]];
+    }
+    return [this.fallbackParticipant(match.agentIds[0]), this.fallbackParticipant(match.agentIds[1])];
+  }
+
+  private matchParticipantIds(match: Match) {
+    return this.matchParticipants(match).map((participant) => participant.id);
+  }
+
+  private participantForId(match: Match, participantId: string) {
+    return this.matchParticipants(match).find((participant) => participant.id === participantId) ?? this.fallbackParticipant(participantId);
+  }
+
+  private agentParticipantIds(match: Match) {
+    return this.matchParticipants(match)
+      .filter((participant) => participant.kind === 'agent' && this.agents.has(participant.id))
+      .map((participant) => participant.id);
   }
 
   private currentRound(match: Match) {

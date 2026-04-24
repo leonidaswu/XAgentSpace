@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import type { Server } from 'node:http';
 import { WebSocketServer } from 'ws';
-import type { AgentEvent, AgentWebSocketSessionResult } from './types.js';
+import type { AgentEvent, AgentWebSocketSessionResult, GameParticipantKind, GameParticipantRef } from './types.js';
 import type { PlatformService } from './platform.js';
 import { agentIntegrationContract } from './agent-contract.js';
 
@@ -59,12 +59,16 @@ type AppPlatform = Pick<
   listGameChallenges?: PlatformService['listGameChallenges'];
   createGameChallenge?: PlatformService['createGameChallenge'];
   joinGameChallenge?: PlatformService['joinGameChallenge'];
+  readyGameChallenge?: PlatformService['readyGameChallenge'];
+  leaveGameChallenge?: PlatformService['leaveGameChallenge'];
   listGameMatches?: PlatformService['listGameMatches'];
   getGameMatch?: PlatformService['getGameMatch'];
   listGameSpectatorEvents?: PlatformService['listGameSpectatorEvents'];
   submitGameTrashTalk?: PlatformService['submitGameTrashTalk'];
   submitGameCommit?: PlatformService['submitGameCommit'];
   submitGameReveal?: PlatformService['submitGameReveal'];
+  gameParticipantForHuman?: PlatformService['gameParticipantForHuman'];
+  gameParticipantForAgent?: PlatformService['gameParticipantForAgent'];
   getSpectatorEventSource?: PlatformService['getSpectatorEventSource'];
 };
 
@@ -249,6 +253,58 @@ function requireHumanSession(
 function serializeHumanAccount<T extends { passwordHash?: string }>(account: T): Omit<T, 'passwordHash'> {
   const { passwordHash: _passwordHash, ...safeAccount } = account;
   return safeAccount;
+}
+
+function readParticipantKind(body: unknown, role: 'challenger' | 'challenged' | 'actor'): GameParticipantKind {
+  const record = body as Record<string, unknown>;
+  const participant = record[role] as Partial<GameParticipantRef> | undefined;
+  const explicitKind = record[`${role}Kind`] ?? record.participantKind;
+  const legacyAgentId = record[`${role}AgentId`] ?? record.agentId;
+
+  if (participant?.kind === 'human' || explicitKind === 'human') {
+    return 'human';
+  }
+  if (participant?.kind === 'agent' || explicitKind === 'agent' || typeof legacyAgentId === 'string') {
+    return 'agent';
+  }
+  return 'agent';
+}
+
+function readParticipantId(body: unknown, role: 'challenger' | 'challenged' | 'actor') {
+  const record = body as Record<string, unknown>;
+  const participant = record[role] as Partial<GameParticipantRef> | undefined;
+  const explicitId = record[`${role}Id`] ?? record.participantId;
+  const legacyAgentId = record[`${role}AgentId`] ?? record.agentId;
+  return String(participant?.id ?? explicitId ?? legacyAgentId ?? '').trim();
+}
+
+function requireGameParticipant(
+  platform: AppPlatform,
+  req: express.Request,
+  role: 'challenger' | 'challenged' | 'actor'
+): GameParticipantRef {
+  const kind = readParticipantKind(req.body, role);
+  const id = readParticipantId(req.body, role);
+  if (!id) {
+    throw new Error(`${role} participant id is required`);
+  }
+
+  if (kind === 'human') {
+    const account = requireHumanSession(platform, req, id);
+    return platform.gameParticipantForHuman?.(account.id) ?? {
+      kind: 'human',
+      id: account.id,
+      displayName: account.displayName,
+      handle: account.username
+    };
+  }
+
+  platform.authenticateAgent?.(id, readBearerToken(req.headers));
+  const participant = platform.gameParticipantForAgent?.(id);
+  if (!participant) {
+    throw new Error('Agent participant lookup unavailable');
+  }
+  return participant;
 }
 
 export function createApp(platform: AppPlatform) {
@@ -728,11 +784,15 @@ export function createApp(platform: AppPlatform) {
 
   app.post('/api/games/:gameId/challenges', (req, res) => {
     try {
-      const token = readBearerToken(req.headers);
-      if (typeof req.body?.challengerAgentId === 'string') {
-        platform.authenticateAgent?.(req.body.challengerAgentId, token);
+      if (!ensureSameOriginWriteRequest(req, res)) {
+        return;
       }
-      const challenge = platform.createGameChallenge?.(req.params.gameId, req.body);
+      const challenger = requireGameParticipant(platform, req, 'challenger');
+      const challenge = platform.createGameChallenge?.(req.params.gameId, {
+        ...req.body,
+        challenger,
+        challengerAgentId: challenger.kind === 'agent' ? challenger.id : undefined
+      });
       if (!challenge) {
         res.status(501).json({ error: 'Game challenge creation unavailable' });
         return;
@@ -745,16 +805,50 @@ export function createApp(platform: AppPlatform) {
 
   app.post('/api/games/:gameId/challenges/:challengeId/join', (req, res) => {
     try {
-      const token = readBearerToken(req.headers);
-      if (typeof req.body?.challengedAgentId === 'string') {
-        platform.authenticateAgent?.(req.body.challengedAgentId, token);
+      if (!ensureSameOriginWriteRequest(req, res)) {
+        return;
       }
-      const match = platform.joinGameChallenge?.(req.params.gameId, req.params.challengeId, req.body);
+      const challenged = requireGameParticipant(platform, req, 'challenged');
+      const match = platform.joinGameChallenge?.(req.params.gameId, req.params.challengeId, {
+        ...req.body,
+        challenged,
+        challengedAgentId: challenged.kind === 'agent' ? challenged.id : undefined
+      });
       if (!match) {
         res.status(501).json({ error: 'Game challenge join unavailable' });
         return;
       }
       res.status(201).json(match);
+    } catch (error) {
+      res.status(authAwareStatus(error as Error)).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/games/:gameId/challenges/:challengeId/ready', (req, res) => {
+    try {
+      if (!ensureSameOriginWriteRequest(req, res)) {
+        return;
+      }
+      const actor = requireGameParticipant(platform, req, 'actor');
+      const result = platform.readyGameChallenge?.(req.params.gameId, req.params.challengeId, actor);
+      if (!result) {
+        res.status(501).json({ error: 'Game challenge ready unavailable' });
+        return;
+      }
+      res.status(200).json(result);
+    } catch (error) {
+      res.status(authAwareStatus(error as Error)).json({ error: (error as Error).message });
+    }
+  });
+
+  app.post('/api/games/:gameId/challenges/:challengeId/leave', (req, res) => {
+    try {
+      if (!ensureSameOriginWriteRequest(req, res)) {
+        return;
+      }
+      const actor = requireGameParticipant(platform, req, 'actor');
+      const result = platform.leaveGameChallenge?.(req.params.gameId, req.params.challengeId, actor) ?? null;
+      res.status(200).json({ challenge: result, dissolved: result === null });
     } catch (error) {
       res.status(authAwareStatus(error as Error)).json({ error: (error as Error).message });
     }
@@ -787,11 +881,11 @@ export function createApp(platform: AppPlatform) {
 
   app.post('/api/games/:gameId/matches/:matchId/trash-talk', (req, res) => {
     try {
-      const token = readBearerToken(req.headers);
-      if (typeof req.body?.agentId === 'string') {
-        platform.authenticateAgent?.(req.body.agentId, token);
+      if (!ensureSameOriginWriteRequest(req, res)) {
+        return;
       }
-      const message = platform.submitGameTrashTalk?.(req.params.gameId, req.params.matchId, req.body.agentId, req.body.text);
+      const actor = requireGameParticipant(platform, req, 'actor');
+      const message = platform.submitGameTrashTalk?.(req.params.gameId, req.params.matchId, actor.id, req.body.text);
       if (!message) {
         res.status(501).json({ error: 'Trash-talk action unavailable' });
         return;
@@ -804,11 +898,11 @@ export function createApp(platform: AppPlatform) {
 
   app.post('/api/games/:gameId/matches/:matchId/commit', (req, res) => {
     try {
-      const token = readBearerToken(req.headers);
-      if (typeof req.body?.agentId === 'string') {
-        platform.authenticateAgent?.(req.body.agentId, token);
+      if (!ensureSameOriginWriteRequest(req, res)) {
+        return;
       }
-      const record = platform.submitGameCommit?.(req.params.gameId, req.params.matchId, req.body.agentId, req.body.commitment);
+      const actor = requireGameParticipant(platform, req, 'actor');
+      const record = platform.submitGameCommit?.(req.params.gameId, req.params.matchId, actor.id, req.body.commitment);
       if (!record) {
         res.status(501).json({ error: 'Commit action unavailable' });
         return;
@@ -821,14 +915,14 @@ export function createApp(platform: AppPlatform) {
 
   app.post('/api/games/:gameId/matches/:matchId/reveal', (req, res) => {
     try {
-      const token = readBearerToken(req.headers);
-      if (typeof req.body?.agentId === 'string') {
-        platform.authenticateAgent?.(req.body.agentId, token);
+      if (!ensureSameOriginWriteRequest(req, res)) {
+        return;
       }
+      const actor = requireGameParticipant(platform, req, 'actor');
       const record = platform.submitGameReveal?.(
         req.params.gameId,
         req.params.matchId,
-        req.body.agentId,
+        actor.id,
         req.body.move,
         req.body.nonce
       );

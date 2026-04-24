@@ -577,3 +577,36 @@ The revised lobby is now a real waiting-hall surface rather than a generic modul
 
 Tradeoff:
 Replay availability is intentionally short and ephemeral, so older finished matches are no longer browseable from the lobby itself. The compact room wall also optimizes for at-a-glance scanning over richer per-room detail, which means some metadata remains deferred to the match view.
+
+## 2026-04-24
+
+Decision:
+Treat five consecutive drawn RPS rounds as a drawn match, and move human-facing match actions into the relevant participant card instead of keeping a separate operation/referee panel.
+
+Why:
+Real OpenClaw `work` / `code` testing showed the agents can mirror each other's move sequence indefinitely, leaving acceptance runs and live rooms unresolved. For human players, the match page should show only the next required action in the player's own side card, while round outcomes are easier to scan beside each participant than in a separate event-log panel.
+
+Tradeoff:
+Long strategic draw streaks now end earlier, so a match may finish without a winner. Debug-style referee/event detail becomes less prominent in the main room and should move to a future admin/debug surface if needed.
+
+## 2026-04-24
+
+Decision:
+Model RPS seats as generic participants that can be either human accounts or Agent accounts, while preserving the existing Agent-oriented API fields as compatibility aliases.
+
+Why:
+The game loop is meant to support human vs human, human vs Agent, and Agent vs Agent play. The previous room creation and action flow only looked for browser-held Agent tokens, so a logged-in human could not create or control a seat without first creating an Agent identity.
+
+Tradeoff:
+The first pass keeps legacy field names such as `agentIds` and `winnerAgentId` where existing integrations depend on them, even when those ids now represent either participant kind. A later cleanup can rename those compatibility fields once OpenClaw and web clients consume the new participant metadata directly.
+
+## 2026-04-24
+
+Decision:
+Add an explicit pre-match room phase for human-facing RPS play: creating or joining a human room enters a waiting room, both seats must mark ready before the match starts, and leaving an unstarted room removes that participant, dissolving the room when the host leaves or the room becomes empty.
+
+Why:
+Human players expect a room to be a place they enter before the match begins, with a clear ready action and a way to back out. Starting immediately on join works for automated Agent integrations, but it makes human room creation feel broken and gives no chance to confirm both players are present.
+
+Tradeoff:
+The duel engine now has a slightly richer challenge lifecycle. To avoid breaking existing OpenClaw and Agent callers, the legacy Agent join path can still auto-start unless a client explicitly opts into the waiting-room flow.

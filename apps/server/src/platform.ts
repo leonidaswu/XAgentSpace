@@ -29,6 +29,7 @@ import type {
   CreateAgentInput,
   CreateHumanAccountInput,
   GameLobbySnapshot,
+  GameParticipantRef,
   GameStateSnapshot,
   GameSummary,
   HumanAccount,
@@ -728,12 +729,28 @@ export class PlatformService extends EventEmitter {
     return this.getGameOrThrow(gameId).listChallenges();
   }
 
-  createGameChallenge(gameId: string, input: { challengerAgentId: string; roundsToWin?: number }) {
+  createGameChallenge(gameId: string, input: { challengerAgentId?: string; challenger?: GameParticipantRef; roundsToWin?: number }) {
     return this.getGameOrThrow(gameId).createChallenge(input);
   }
 
-  joinGameChallenge(gameId: string, challengeId: string, input: { challengedAgentId: string }) {
+  joinGameChallenge(gameId: string, challengeId: string, input: { challengedAgentId?: string; challenged?: GameParticipantRef; autoStart?: boolean }) {
     return this.getGameOrThrow(gameId).joinChallenge(challengeId, input);
+  }
+
+  readyGameChallenge(gameId: string, challengeId: string, participant: GameParticipantRef) {
+    const game = this.getGameOrThrow(gameId);
+    if (!game.readyChallenge) {
+      throw new Error('Game challenge ready unavailable');
+    }
+    return game.readyChallenge(challengeId, participant);
+  }
+
+  leaveGameChallenge(gameId: string, challengeId: string, participant: GameParticipantRef) {
+    const game = this.getGameOrThrow(gameId);
+    if (!game.leaveChallenge) {
+      throw new Error('Game challenge leave unavailable');
+    }
+    return game.leaveChallenge(challengeId, participant);
   }
 
   listGameMatches(gameId: string) {
@@ -758,6 +775,38 @@ export class PlatformService extends EventEmitter {
 
   submitGameReveal(gameId: string, matchId: string, agentId: string, move: string, nonce: string) {
     return this.getGameOrThrow(gameId).submitReveal(matchId, agentId, move, nonce);
+  }
+
+  gameParticipantForHuman(humanId: string): GameParticipantRef {
+    const human = this.humans.get(humanId);
+    if (!human) {
+      throw new Error(`Unknown human account: ${humanId}`);
+    }
+    if (human.lifecycleState !== 'active') {
+      throw new Error('Human account is not active');
+    }
+    return {
+      kind: 'human',
+      id: human.id,
+      displayName: human.displayName,
+      handle: human.username
+    };
+  }
+
+  gameParticipantForAgent(agentId: string): GameParticipantRef {
+    const agent = this.agentAccounts.get(agentId);
+    if (!agent) {
+      throw new Error(`Unknown agent account: ${agentId}`);
+    }
+    if (agent.lifecycleState !== 'active') {
+      throw new Error('Agent account is not active');
+    }
+    return {
+      kind: 'agent',
+      id: agent.id,
+      displayName: agent.displayName,
+      handle: agent.handle
+    };
   }
 
   getSpectatorEventSource(gameId: string) {

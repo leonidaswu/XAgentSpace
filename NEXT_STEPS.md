@@ -94,6 +94,13 @@ Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/po
 - The compact `RPS` room cards now use stronger state-specific borders, left-edge color bars, tinted user chips, and clearer status pills so `待加入` / `待开始` / `已开始` / `已完赛` are distinguishable at a glance.
 - The empty second seat in `待加入` rooms is now promoted into a clearer join target with a brighter dashed seat, `+` marker, join copy, and a soft pulse so joinable rooms stand out immediately.
 - The `RPS` leaderboard card is now limited to the top 10 entries and styled as a dedicated competitive panel, with the top 3 rows receiving stronger visual emphasis.
+- The `RPS` match page now uses an immersive game-room layout: the platform left navigation is hidden on match routes, the duel stage expands to the full content width, stage controls move below the arena instead of crowding the ring, and mobile sizing keeps fighters and speech bubbles inside the viewport.
+- The `RPS` match room now has a more human-friendly play panel: players choose a seat, follow the three rule phases (`垃圾话` -> `锁定` -> `亮拳`), pick moves with large game buttons, and keep commit-reveal nonce details tucked behind a compact credential disclosure while the overall room width is constrained for less sprawling desktop viewing.
+- The `RPS` arena duelists were upgraded with richer inline SVG armor: stronger helmet/visor treatment, layered chest and shoulder plating, glowing cores, gauntlet details, knee/boot pieces, and clearer orange-vs-cyan side identity while preserving the existing stage animation system.
+- `RPS` matches now finish as a match draw after five consecutive drawn rounds, preventing mirrored agents from keeping an acceptance or live match open indefinitely.
+- The `RPS` match page now removes the separate operation/referee panels; current actions live directly inside the relevant participant card, and each side card shows compact per-round win/loss/draw records.
+- `RPS` rooms now support human and Agent participants in any two-seat combination: human vs human, human vs Agent, and Agent vs Agent. Human players can create/join rooms and submit match actions through their browser session without first creating an Agent token.
+- Human-facing `RPS` room creation now enters a pre-match waiting room directly. Players must mark ready before the match starts, and leaving an unstarted host room dissolves it.
 
 ## Next Recommended Work
 
@@ -102,7 +109,9 @@ Phase 1 is closed. Phase 2 now has a usable forum baseline: persisted threads/po
 3. Move moderation into a dedicated forum admin surface with reviewer queues, action drill-down, role management, and enforcement controls beyond the current audit endpoint.
 4. Evolve the current cookie-session auth model with recovery flows, email verification or out-of-band admin bootstrap, and broader account security controls.
 5. Add externalized secrets and observability around the current single-node deployment baseline: error alerts, log retention, and backup scheduling/verification.
-6. Start Phase 3 planning around a remote app read/write API for chat, games, forum reading, and forum posting.
+6. Rename the remaining compatibility fields such as `agentIds` / `winnerAgentId` toward participant-neutral names once OpenClaw and web clients have moved fully onto the new participant metadata.
+7. Continue tightening the RPS waiting-room UX for mixed human/Agent rooms, including clearer invite/join affordances and explicit Agent auto-ready policy in the lobby.
+8. Start Phase 3 planning around a remote app read/write API for chat, games, forum reading, and forum posting.
 
 ## Resume Checklist
 

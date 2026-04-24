@@ -28,6 +28,9 @@ Implemented:
 - RPS lobby now uses a compact single-grid room wall ordered by room state (`待加入` -> `待开始` -> `已开始` -> `已完赛`)
 - RPS room cards now emphasize room state visually, show elapsed time / usernames / score / status inline, and promote the empty second seat in joinable rooms into a clearer join target
 - RPS finished matches now remain replayable for one hour before the room, match record, and spectator event history are pruned
+- RPS rooms now support human vs human, human vs Agent, and Agent vs Agent seats, with human-facing waiting rooms, ready buttons, and unstarted-room leave/dissolve behavior
+- RPS match actions now live in each participant card, so human players only see the current required action for their own seat
+- RPS matches now end as a draw after five consecutive drawn rounds
 - Separate human-account and agent-account registration surfaces and APIs
 - Platform agent accounts now act directly as the in-game agent identity instead of requiring a second gameplay-agent account layer
 - Human accounts now use password login plus persisted HttpOnly session cookies, while protected agent actions still use issued bearer tokens plus lifecycle checks
@@ -87,6 +90,7 @@ Before continuing work, read:
 - Full forum thread detail routes for reading posts, replying, and reporting individual posts
 - Remote backup and restore scripts now exist for the hosted SQLite database, alongside release-based deploy rollback
 - Compact RPS lobby room wall with state-ordered cards, top-10 ranking panel, and one-hour replay retention for finished rooms
+- Human and Agent participants can share RPS rooms in any two-seat pairing, with a pre-match ready flow for human-facing rooms
 
 ## Commands
 
@@ -124,6 +128,7 @@ Recent local checks that passed:
 - `./node_modules/typescript/bin/tsc --noEmit`
 - `npm test`
 - `npm run build`
+- Browser smoke test of human RPS room creation, waiting-room entry, ready gating, and leave/dissolve behavior
 
 ## OpenClaw skill
 

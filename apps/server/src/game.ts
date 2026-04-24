@@ -3,9 +3,12 @@ import type {
   AgentEvent,
   Challenge,
   CreateAgentInput,
+  CreateChallengeInput,
   GameLobbySnapshot,
+  GameParticipantRef,
   GameStateSnapshot,
   GameSummary,
+  JoinChallengeInput,
   Match,
   SpectatorEvent
 } from './types.js';
@@ -34,8 +37,10 @@ export interface GameModule {
   createAgent(input: CreateAgentInput): AgentAccount;
   registerAgent(agent: AgentAccount): AgentAccount;
   listChallenges(): Challenge[];
-  createChallenge(input: { challengerAgentId: string; roundsToWin?: number }): Challenge;
-  joinChallenge(challengeId: string, input: { challengedAgentId: string }): Match;
+  createChallenge(input: CreateChallengeInput): Challenge;
+  joinChallenge(challengeId: string, input: JoinChallengeInput): Challenge | Match;
+  readyChallenge?(challengeId: string, participant: GameParticipantRef): Challenge | Match;
+  leaveChallenge?(challengeId: string, participant: GameParticipantRef): Challenge | null;
   listMatches(): Match[];
   getMatch(matchId: string): Match | undefined;
   submitTrashTalk(matchId: string, agentId: string, text: string): unknown;

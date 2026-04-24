@@ -16,9 +16,19 @@ type Agent = {
   createdAt: string;
 };
 
+type GameParticipant = {
+  kind: 'human' | 'agent';
+  id: string;
+  displayName: string;
+  handle: string;
+};
+
 type Challenge = {
   id: string;
-  challengerAgentId: string;
+  challengerAgentId?: string;
+  challenger?: GameParticipant;
+  challenged?: GameParticipant;
+  readyParticipantIds?: string[];
   roundsToWin: number;
   createdAt: string;
   status: 'open' | 'matched';
@@ -29,12 +39,25 @@ type Match = {
   id: string;
   challengeId: string;
   agentIds: [string, string];
+  participants?: [GameParticipant, GameParticipant];
   roundsToWin: number;
   status: 'active' | 'finished';
   phase: string;
   currentRound: number;
+  rounds: Round[];
   scoreboard: Record<string, number>;
-  winnerAgentId?: string;
+  winnerAgentId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type Round = {
+  number: number;
+  phase: string;
+  trashTalk: Array<{ agentId: string; text: string }>;
+  commits: Record<string, unknown>;
+  reveals: Record<string, { agentId: string; move: string }>;
+  winnerAgentId?: string | null;
 };
 
 type SpectatorEvent = {
@@ -80,8 +103,9 @@ type GameRoomSummary = {
   title: string;
   roundLabel: string;
   occupantAgentIds: string[];
+  occupants?: GameParticipant[];
   spectatorMatchId?: string;
-  actionLabel: 'join' | 'spectate' | 'replay';
+  actionLabel: 'join' | 'enter' | 'spectate' | 'replay';
 };
 
 type GameLeaderboardEntry = {
@@ -316,6 +340,20 @@ type StageCue = {
   freezeResult: boolean;
   highlightCharge: boolean;
 };
+
+type PlayerDraft = {
+  trashTalk: string;
+  move: string;
+  nonce: string;
+};
+
+const defaultPlayerTrashTalk = '下一局你会开始怀疑概率论。';
+const quickTrashTalks = [
+  '这一拳我已经算到小数点后两位。',
+  '你的随机数发生器今天要罢工。',
+  '别眨眼，下一秒就见分晓。',
+  '我不预测胜利，我只是执行它。'
+];
 
 function createClientNonce() {
   const webCrypto = globalThis.crypto;
@@ -877,8 +915,15 @@ function useSpectatorFeed(gameId: string | null, matchId: string | null) {
   return events;
 }
 
-function formatEvent(event: SpectatorEvent, agents: Agent[]): FormattedEvent {
-  const agentName = (agentId: unknown) => agents.find((agent) => agent.id === agentId)?.displayName ?? String(agentId);
+function formatEvent(event: SpectatorEvent, agents: Agent[], participants: GameParticipant[] = []): FormattedEvent {
+  const eventParticipant = (value: unknown) =>
+    value && typeof value === 'object' && 'displayName' in value ? String((value as GameParticipant).displayName) : null;
+  const agentName = (agentId: unknown) =>
+    eventParticipant(event.payload.participant) ??
+    eventParticipant(event.payload.winner) ??
+    participants.find((participant) => participant.id === agentId)?.displayName ??
+    agents.find((agent) => agent.id === agentId)?.displayName ??
+    String(agentId);
 
   if (event.type === 'trash_talk_sent') {
     return {
@@ -915,6 +960,14 @@ function formatEvent(event: SpectatorEvent, agents: Agent[]): FormattedEvent {
   }
 
   if (event.type === 'match_finished') {
+    if (!event.payload.winnerAgentId) {
+      return {
+        kind: 'system',
+        title: '对战结束',
+        body: event.payload.drawReason === 'max_consecutive_draws' ? '连续 5 轮平局，本场判为平局' : '本场平局'
+      };
+    }
+
     return {
       kind: 'system',
       title: '对战结束',
@@ -1035,6 +1088,7 @@ function createStageCue(input: {
   activeTrashTalk: SpectatorEvent | null;
   latestActionEvent: SpectatorEvent | null;
   agents: Agent[];
+  participants?: GameParticipant[];
 }): StageCue {
   const {
     phase,
@@ -1044,10 +1098,13 @@ function createStageCue(input: {
     latestRoundWinnerAgentId,
     activeTrashTalk,
     latestActionEvent,
-    agents
+    agents,
+    participants = []
   } = input;
   const latestWinnerName =
-    agents.find((agent) => agent.id === latestRoundWinnerAgentId)?.displayName ?? '胜者';
+    participants.find((participant) => participant.id === latestRoundWinnerAgentId)?.displayName ??
+    agents.find((agent) => agent.id === latestRoundWinnerAgentId)?.displayName ??
+    '胜者';
 
   if (phase === 'trash_talk_round_open') {
     if (latestActionEvent?.type === 'trash_talk_sent' && cueElapsedMs < 720) {
@@ -1237,6 +1294,9 @@ function DuelistIllustration({ side }: { side: 'left' | 'right' }) {
   const shellBottom = side === 'left' ? '#f55d33' : '#16b8b0';
   const accent = side === 'left' ? '#fff1e5' : '#ecffff';
   const trim = side === 'left' ? '#4a1f12' : '#0d3f40';
+  const darkTrim = side === 'left' ? '#24100c' : '#082c30';
+  const energy = side === 'left' ? '#ffe071' : '#7ff7ff';
+  const energyMid = side === 'left' ? '#d8ff62' : '#83ffdf';
 
   return (
     <svg className="duelist-figure" viewBox="0 0 240 296" aria-hidden="true">
@@ -1250,40 +1310,75 @@ function DuelistIllustration({ side }: { side: 'left' | 'right' }) {
           <stop offset="0%" stopColor={accent} />
           <stop offset="100%" stopColor={trim} />
         </linearGradient>
+        <linearGradient id={`${prefix}-dark`} x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor={trim} />
+          <stop offset="100%" stopColor={darkTrim} />
+        </linearGradient>
+        <linearGradient id={`${prefix}-visor`} x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#f8ffff" />
+          <stop offset="45%" stopColor={energy} />
+          <stop offset="100%" stopColor="#eaffff" />
+        </linearGradient>
         <radialGradient id={`${prefix}-core`} cx="50%" cy="50%" r="60%">
           <stop offset="0%" stopColor="#f8ffe6" />
-          <stop offset="42%" stopColor="#d8ff62" />
+          <stop offset="42%" stopColor={energyMid} />
           <stop offset="100%" stopColor="#42d3c8" />
         </radialGradient>
+        <filter id={`${prefix}-soft-glow`} x="-40%" y="-40%" width="180%" height="180%">
+          <feGaussianBlur stdDeviation="3.8" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
       </defs>
       <ellipse className="figure-shadow" cx="120" cy="272" rx="58" ry="14" />
+      <path className="figure-energy-aura" style={{ fill: energy }} d="M66 102c-20 20-25 54-15 91 8 30 32 53 69 60 37-7 61-30 69-60 10-37 5-71-15-91 13 30 11 62-5 89-13 23-29 35-49 41-20-6-36-18-49-41-16-27-18-59-5-89z" />
       <g className="figure-back-arm">
-        <rect className="figure-arm" style={{ fill: `url(#${prefix}-shell)` }} x="147" y="114" width="58" height="24" rx="12" transform="rotate(28 147 114)" />
-        <circle className="figure-gauntlet figure-gauntlet-back" style={{ fill: `url(#${prefix}-trim)` }} cx="188" cy="153" r="18" />
+        <rect className="figure-arm" style={{ fill: `url(#${prefix}-shell)` }} x="146" y="112" width="61" height="26" rx="13" transform="rotate(28 147 114)" />
+        <circle className="figure-gauntlet figure-gauntlet-back" style={{ fill: `url(#${prefix}-dark)` }} cx="188" cy="153" r="19" />
+        <circle className="figure-gauntlet-core" style={{ fill: energy }} cx="188" cy="153" r="7" />
       </g>
       <g className="figure-legs">
-        <path className="figure-leg" style={{ fill: `url(#${prefix}-shell)` }} d="M96 176h26l8 72H98z" />
-        <path className="figure-leg figure-leg-back" style={{ fill: `url(#${prefix}-trim)` }} d="M128 176h25l-4 74h-30z" />
-        <path className="figure-foot" style={{ fill: `url(#${prefix}-shell)` }} d="M93 247h42c11 0 18 8 18 17H93z" />
-        <path className="figure-foot" style={{ fill: `url(#${prefix}-shell)` }} d="M116 250h44c12 0 19 8 19 17h-63z" />
+        <path className="figure-leg" style={{ fill: `url(#${prefix}-shell)` }} d="M94 176h28l8 73H98z" />
+        <path className="figure-leg figure-leg-back" style={{ fill: `url(#${prefix}-trim)` }} d="M128 176h27l-4 74h-32z" />
+        <path className="figure-knee" style={{ fill: `url(#${prefix}-dark)` }} d="M95 205h30l4 16-15 10-18-8z" />
+        <path className="figure-knee" style={{ fill: `url(#${prefix}-dark)` }} d="M126 205h28l-2 22-18 6-13-12z" />
+        <path className="figure-foot" style={{ fill: `url(#${prefix}-shell)` }} d="M91 247h45c12 0 19 8 19 18H91z" />
+        <path className="figure-foot" style={{ fill: `url(#${prefix}-shell)` }} d="M116 250h46c13 0 20 8 20 18h-66z" />
+        <path className="figure-sole" style={{ fill: `url(#${prefix}-dark)` }} d="M92 262h62v7H92z" />
+        <path className="figure-sole" style={{ fill: `url(#${prefix}-dark)` }} d="M116 265h66v7h-66z" />
       </g>
       <g className="figure-body">
-        <path className="figure-cape" d="M70 94c12-20 33-31 50-31 28 0 46 10 58 31l-14 70H82z" />
-        <path className="figure-torso" style={{ fill: `url(#${prefix}-shell)` }} d="M84 86h72l14 22v52c0 25-22 44-50 44s-50-19-50-44v-52z" />
-        <path className="figure-chest" style={{ fill: `url(#${prefix}-trim)` }} d="M96 104h48l14 20-18 32h-40l-18-32z" />
-        <path className="figure-belt" style={{ fill: `url(#${prefix}-trim)` }} d="M88 164h64l8 14-14 10h-52l-14-10z" />
-        <path className="figure-helmet" style={{ fill: `url(#${prefix}-shell)` }} d="M76 46c0-25 19-42 44-42s44 17 44 42v22H76z" />
-        <path className="figure-faceplate" style={{ fill: `url(#${prefix}-trim)` }} d="M86 50h68v36c0 16-15 28-34 28S86 102 86 86z" />
-        <path className="figure-crest" style={{ fill: `url(#${prefix}-trim)` }} d="M108 6h24l8 28h-40z" />
-        <rect className="figure-visor" x="92" y="58" width="56" height="14" rx="7" />
-        <path className="figure-shoulder-left" style={{ fill: `url(#${prefix}-shell)` }} d="M64 101h33l-9 35H56c-8 0-12-10-6-16z" />
-        <path className="figure-shoulder-right" style={{ fill: `url(#${prefix}-shell)` }} d="M176 101h-33l9 35h32c8 0 12-10 6-16z" />
-        <circle className="figure-core" style={{ fill: `url(#${prefix}-core)` }} cx="120" cy="140" r="20" />
-        <path className="figure-highlight" d="M94 106h44l10 14H88z" />
+        <path className="figure-cape" d="M67 93c13-22 35-33 53-33 30 0 48 11 61 33l-12 73H71z" />
+        <path className="figure-torso" style={{ fill: `url(#${prefix}-shell)` }} d="M82 86h76l15 23v50c0 27-23 47-53 47s-53-20-53-47v-50z" />
+        <path className="figure-side-panel" style={{ fill: `url(#${prefix}-dark)` }} d="M72 115h24l-4 47-16 14-9-18v-34z" />
+        <path className="figure-side-panel" style={{ fill: `url(#${prefix}-dark)` }} d="M168 115h-24l4 47 16 14 9-18v-34z" />
+        <path className="figure-chest" style={{ fill: `url(#${prefix}-trim)` }} d="M94 103h52l16 21-19 35h-46l-19-35z" />
+        <path className="figure-chest-plate" style={{ fill: `url(#${prefix}-dark)` }} d="M99 112h42l10 14-13 20h-36l-13-20z" />
+        <path className="figure-belt" style={{ fill: `url(#${prefix}-trim)` }} d="M86 165h68l9 14-15 11H92l-15-11z" />
+        <path className="figure-belt-line" style={{ fill: accent }} d="M94 172h52l5 6H89z" />
+        <path className="figure-neck" style={{ fill: `url(#${prefix}-dark)` }} d="M100 80h40l8 14h-56z" />
+        <path className="figure-helmet" style={{ fill: `url(#${prefix}-shell)` }} d="M74 47c0-27 20-44 46-44s46 17 46 44v23H74z" />
+        <path className="figure-helmet-ridge" style={{ fill: `url(#${prefix}-dark)` }} d="M99 13h42l10 36H89z" />
+        <path className="figure-faceplate" style={{ fill: `url(#${prefix}-dark)` }} d="M84 50h72v37c0 17-16 30-36 30S84 104 84 87z" />
+        <path className="figure-jaw" style={{ fill: `url(#${prefix}-trim)` }} d="M96 91h48l-8 16h-32z" />
+        <path className="figure-crest" style={{ fill: `url(#${prefix}-trim)` }} d="M107 5h26l9 31H98z" />
+        <rect className="figure-visor" style={{ fill: `url(#${prefix}-visor)`, filter: `url(#${prefix}-soft-glow)` }} x="91" y="58" width="58" height="15" rx="7.5" />
+        <rect className="figure-visor-shine" x="98" y="61" width="44" height="4" rx="2" />
+        <path className="figure-shoulder-left" style={{ fill: `url(#${prefix}-shell)` }} d="M61 101h38l-10 39H54c-9 0-14-11-7-18z" />
+        <path className="figure-shoulder-right" style={{ fill: `url(#${prefix}-shell)` }} d="M179 101h-38l10 39h35c9 0 14-11 7-18z" />
+        <path className="figure-shoulder-trim" style={{ fill: `url(#${prefix}-dark)` }} d="M64 112h26l-4 12H57z" />
+        <path className="figure-shoulder-trim" style={{ fill: `url(#${prefix}-dark)` }} d="M176 112h-26l4 12h29z" />
+        <circle className="figure-core-ring" style={{ fill: `url(#${prefix}-dark)` }} cx="120" cy="141" r="24" />
+        <circle className="figure-core" style={{ fill: `url(#${prefix}-core)`, filter: `url(#${prefix}-soft-glow)` }} cx="120" cy="141" r="17" />
+        <circle className="figure-core-spark" style={{ fill: accent }} cx="114" cy="135" r="5" />
+        <path className="figure-highlight" d="M92 106h48l11 15H86z" />
       </g>
       <g className="figure-front-arm">
-        <rect className="figure-arm" style={{ fill: `url(#${prefix}-shell)` }} x="36" y="114" width="64" height="24" rx="12" transform="rotate(-30 36 114)" />
-        <circle className="figure-gauntlet figure-gauntlet-front" style={{ fill: `url(#${prefix}-trim)` }} cx="48" cy="156" r="22" />
+        <rect className="figure-arm" style={{ fill: `url(#${prefix}-shell)` }} x="34" y="113" width="66" height="26" rx="13" transform="rotate(-30 36 114)" />
+        <circle className="figure-gauntlet figure-gauntlet-front" style={{ fill: `url(#${prefix}-dark)` }} cx="48" cy="156" r="23" />
+        <circle className="figure-gauntlet-core" style={{ fill: energy }} cx="48" cy="156" r="9" />
         <circle className="figure-knuckle" style={{ fill: accent }} cx="39" cy="156" r="6" />
         <circle className="figure-knuckle" style={{ fill: accent }} cx="49" cy="146" r="6" />
         <circle className="figure-knuckle" style={{ fill: accent }} cx="59" cy="154" r="6" />
@@ -1377,6 +1472,7 @@ type Route =
   | { name: 'agent-docs' }
   | { name: 'games' }
   | { name: 'game-lobby'; gameId: string }
+  | { name: 'game-room'; gameId: string; challengeId: string }
   | { name: 'game-match'; gameId: string; matchId: string };
 
 type NavItem = {
@@ -1415,7 +1511,7 @@ const navItems: NavItem[] = [
     label: '游戏板块',
     description: '观战、房间与排行',
     href: '/games',
-    matches: (route) => route.name === 'games' || route.name === 'game-lobby' || route.name === 'game-match'
+    matches: (route) => route.name === 'games' || route.name === 'game-lobby' || route.name === 'game-room' || route.name === 'game-match'
   }
 ];
 
@@ -1463,6 +1559,15 @@ function parseRoute(pathname: string): Route {
       name: 'game-match',
       gameId: decodeURIComponent(gameMatchPath[1]),
       matchId: decodeURIComponent(gameMatchPath[2])
+    };
+  }
+
+  const gameRoomPath = pathname.match(/^\/games\/([^/]+)\/rooms\/([^/]+)$/);
+  if (gameRoomPath) {
+    return {
+      name: 'game-room',
+      gameId: decodeURIComponent(gameRoomPath[1]),
+      challengeId: decodeURIComponent(gameRoomPath[2])
     };
   }
 
@@ -1534,9 +1639,7 @@ function App() {
   const [challengeAgentId, setChallengeAgentId] = useState('');
   const [joinAgentId, setJoinAgentId] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState('');
-  const [trashTalk, setTrashTalk] = useState('下一局你会开始怀疑概率论。');
-  const [selectedMove, setSelectedMove] = useState('rock');
-  const [nonce, setNonce] = useState(() => createClientNonce());
+  const [playerDrafts, setPlayerDrafts] = useState<Record<string, PlayerDraft>>({});
   const [status, setStatus] = useState<string | null>(null);
   const [replayMode, setReplayMode] = useState(false);
   const [replayIndex, setReplayIndex] = useState(0);
@@ -1588,7 +1691,7 @@ function App() {
 
   const games = gamesData;
   const activeGameId =
-    route.name === 'game-lobby' || route.name === 'game-match' ? route.gameId : games[0]?.id ?? 'rps';
+    route.name === 'game-lobby' || route.name === 'game-room' || route.name === 'game-match' ? route.gameId : games[0]?.id ?? 'rps';
   const activeForumId = route.name === 'forum' || route.name === 'forum-thread' ? route.forum : null;
   const activeThreadId = route.name === 'forum-thread' ? route.threadId : null;
   const activeAnnouncementId = route.name === 'announcement-detail' ? route.announcementId : null;
@@ -1621,6 +1724,8 @@ function App() {
   const matches = gameState?.matches ?? [];
   const challenges = gameState?.challenges ?? [];
   const moveOptions = gameState?.game.moveOptions ?? [];
+  const selectedChallenge =
+    challenges.find((challenge) => challenge.id === (route.name === 'game-room' ? route.challengeId : null)) ?? null;
   const selectedMatch =
     matches.find((match) => match.id === (route.name === 'game-match' ? route.matchId : selectedMatchId)) ??
     matches[0] ??
@@ -1654,17 +1759,6 @@ function App() {
     return isAnnouncementModerator || (item.author.kind === 'human' && item.author.id === currentHumanAccount.id);
   }
 
-  useEffect(() => {
-    const nextMove = moveOptions[0]?.id;
-    if (!nextMove) {
-      return;
-    }
-
-    if (!moveOptions.some((option) => option.id === selectedMove)) {
-      setSelectedMove(nextMove);
-    }
-  }, [moveOptions, selectedMove]);
-
   function getAgentAuthHeaders(agentId: string) {
     const token = agentAuthTokens[agentId];
     if (!token) {
@@ -1674,6 +1768,102 @@ function App() {
     return {
       Authorization: `Bearer ${token}`
     };
+  }
+
+  function participantForHuman(account: HumanAccount): GameParticipant {
+    return {
+      kind: 'human',
+      id: account.id,
+      displayName: account.displayName,
+      handle: account.username
+    };
+  }
+
+  function participantForAgent(agent: Agent): GameParticipant {
+    return {
+      kind: 'agent',
+      id: agent.id,
+      displayName: agent.displayName,
+      handle: agent.handle
+    };
+  }
+
+  function participantAuthHeaders(participant: GameParticipant) {
+    return participant.kind === 'agent' ? getAgentAuthHeaders(participant.id) : undefined;
+  }
+
+  function matchParticipants(match: Match | null): GameParticipant[] {
+    if (!match) {
+      return [];
+    }
+
+    if (match.participants?.length === 2) {
+      return match.participants;
+    }
+
+    return match.agentIds.map((agentId) => {
+      const agent = agents.find((item) => item.id === agentId);
+      if (agent) {
+        return participantForAgent(agent);
+      }
+      const human = humanAccounts.find((account) => account.id === agentId);
+      return human ? participantForHuman(human) : { kind: 'agent' as const, id: agentId, displayName: agentId, handle: agentId };
+    });
+  }
+
+  function challengeParticipants(challenge: Challenge | null): GameParticipant[] {
+    if (!challenge) {
+      return [];
+    }
+    const challenger =
+      challenge.challenger ??
+      (challenge.challengerAgentId
+        ? participantByKnownId(challenge.challengerAgentId)
+        : null);
+    return [challenger, challenge.challenged].filter(Boolean) as GameParticipant[];
+  }
+
+  function participantByKnownId(participantId: string): GameParticipant | null {
+    const agent = agents.find((item) => item.id === participantId);
+    const human = humanAccounts.find((account) => account.id === participantId);
+    return agent ? participantForAgent(agent) : human ? participantForHuman(human) : null;
+  }
+
+  function participantById(participantId: string) {
+    return (
+      matchParticipants(selectedMatch).find((participant) => participant.id === participantId) ??
+      challengeParticipants(selectedChallenge).find((participant) => participant.id === participantId) ??
+      participantByKnownId(participantId) ??
+      null
+    );
+  }
+
+  function controllableParticipant(participant: GameParticipant) {
+    if (participant.kind === 'human') {
+      return currentHumanAccount?.id === participant.id;
+    }
+    return Boolean(agentAuthTokens[participant.id]);
+  }
+
+  function playerDraftFor(agentId: string): PlayerDraft {
+    return playerDrafts[agentId] ?? {
+      trashTalk: defaultPlayerTrashTalk,
+      move: moveOptions[0]?.id ?? 'rock',
+      nonce: createClientNonce()
+    };
+  }
+
+  function updatePlayerDraft(agentId: string, patch: Partial<PlayerDraft>) {
+    setPlayerDrafts((current) => {
+      const existing = current[agentId] ?? playerDraftFor(agentId);
+      return {
+        ...current,
+        [agentId]: {
+          ...existing,
+          ...patch
+        }
+      };
+    });
   }
 
   function navigate(nextPath: string) {
@@ -1772,21 +1962,74 @@ function App() {
   }, [route, selectedMatch]);
 
   useEffect(() => {
-    if (!selectedAgentId && agents[0]) {
+    if (!selectedAgentId && (currentHumanAccount || agents[0])) {
       const controllableAgents = agents.filter((agent) => Boolean(agentAuthTokens[agent.id]));
-      const primary = controllableAgents[0] ?? agents[0];
-      const secondary = controllableAgents[1] ?? agents.find((agent) => agent.id !== primary.id) ?? primary;
+      const primary = currentHumanAccount ? participantForHuman(currentHumanAccount) : controllableAgents[0] ? participantForAgent(controllableAgents[0]) : participantForAgent(agents[0]);
+      const secondaryAgent = controllableAgents.find((agent) => agent.id !== primary.id) ?? agents.find((agent) => agent.id !== primary.id);
       setSelectedAgentId(primary.id);
-      setChallengeAgentId(primary.id);
-      setJoinAgentId(secondary.id);
+      setChallengeAgentId(primary.kind === 'agent' ? primary.id : '');
+      setJoinAgentId(secondaryAgent?.id ?? '');
     }
-  }, [agentAuthTokens, agents, selectedAgentId]);
+  }, [agentAuthTokens, agents, currentHumanAccount, selectedAgentId]);
+
+  useEffect(() => {
+    const fallbackMove = moveOptions[0]?.id ?? 'rock';
+    setPlayerDrafts((current) => {
+      let changed = false;
+      const next = { ...current };
+
+      const draftParticipants = [
+        ...agents.map((agent) => participantForAgent(agent)),
+        ...(currentHumanAccount ? [participantForHuman(currentHumanAccount)] : []),
+        ...matchParticipants(selectedMatch)
+      ];
+      for (const participant of draftParticipants) {
+        const existing = next[participant.id];
+        if (!existing) {
+          next[participant.id] = {
+            trashTalk: defaultPlayerTrashTalk,
+            move: fallbackMove,
+            nonce: createClientNonce()
+          };
+          changed = true;
+          continue;
+        }
+
+        if (moveOptions.length > 0 && !moveOptions.some((option) => option.id === existing.move)) {
+          next[participant.id] = { ...existing, move: fallbackMove, nonce: createClientNonce() };
+          changed = true;
+        }
+      }
+
+      return changed ? next : current;
+    });
+  }, [agents, currentHumanAccount, moveOptions, selectedMatch]);
+
+  useEffect(() => {
+    if (!selectedMatch) {
+      return;
+    }
+
+    const participants = matchParticipants(selectedMatch);
+    if (participants.some((participant) => participant.id === selectedAgentId)) {
+      return;
+    }
+
+    const localParticipant = participants.find((participant) => controllableParticipant(participant));
+    setSelectedAgentId(localParticipant?.id ?? participants[0]?.id ?? '');
+  }, [agentAuthTokens, currentHumanAccount, selectedAgentId, selectedMatch]);
 
   useEffect(() => {
     if (!selectedMatchId && matches[0]) {
       setSelectedMatchId(matches[0].id);
     }
   }, [matches, selectedMatchId]);
+
+  useEffect(() => {
+    if (route.name === 'game-room' && selectedChallenge?.matchId) {
+      navigate(`/games/${route.gameId}/matches/${selectedChallenge.matchId}`);
+    }
+  }, [route, selectedChallenge?.matchId]);
 
   useEffect(() => {
     if (announcementDetail && activeAnnouncementId && canManageAnnouncement(announcementDetail)) {
@@ -1804,21 +2047,23 @@ function App() {
   }, [activeAnnouncementId, announcementDetail?.id, currentHumanAccount?.id]);
 
   const displayState = useMemo(() => createDisplayState(selectedMatch, displayedEvents), [displayedEvents, selectedMatch]);
+  const selectedMatchParticipants = useMemo(() => matchParticipants(selectedMatch), [agents, humanAccounts, selectedMatch]);
 
   const currentScore = useMemo(() => {
     if (!selectedMatch) {
       return [];
     }
 
-    return selectedMatch.agentIds.map((agentId) => ({
-      agent: agents.find((agent) => agent.id === agentId),
-      score: displayState.scoreboard[agentId] ?? 0
+    return matchParticipants(selectedMatch).map((participant) => ({
+      participant,
+      agent: participant.kind === 'agent' ? agents.find((agent) => agent.id === participant.id) : undefined,
+      score: displayState.scoreboard[participant.id] ?? 0
     }));
-  }, [agents, displayState.scoreboard, selectedMatch]);
+  }, [agents, displayState.scoreboard, humanAccounts, selectedMatch]);
 
   const formattedLiveEvents = useMemo(
-    () => displayedEvents.map((event) => ({ event, formatted: formatEvent(event, agents) })),
-    [agents, displayedEvents]
+    () => displayedEvents.map((event) => ({ event, formatted: formatEvent(event, agents, selectedMatchParticipants) })),
+    [agents, displayedEvents, selectedMatchParticipants]
   );
 
   const stageEvent = useMemo(() => {
@@ -1867,7 +2112,8 @@ function App() {
         latestRoundWinnerAgentId: displayState.latestRoundWinnerAgentId,
         activeTrashTalk,
         latestActionEvent: stageEvent,
-        agents
+        agents,
+        participants: selectedMatchParticipants
       }),
     [
       activeTrashTalk,
@@ -1877,7 +2123,8 @@ function App() {
       displayState.latestRoundWinnerAgentId,
       displayState.phase,
       revealedMoves.size,
-      stageEvent
+      stageEvent,
+      selectedMatchParticipants
     ]
   );
   const replayStatus = replayMode
@@ -1887,6 +2134,33 @@ function App() {
     : replayIndex > 0 && replayIndex < liveEvents.length
       ? `已暂停 · ${displayedEvents.length}/${liveEvents.length}`
       : `直播中 · ${liveEvents.length} 条事件`;
+
+  const matchParticipantIds = selectedMatchParticipants.map((participant) => participant.id);
+  const expectedTrashTalkAgentId =
+    selectedMatch && displayState.phase === 'trash_talk_round_open'
+      ? matchParticipantIds[roundTrashTalk.length % matchParticipantIds.length]
+      : null;
+  const committedAgentIds = useMemo(() => {
+    const submitted = new Set<string>();
+    for (const event of currentRoundFeed) {
+      if (event.type !== 'move_committed') {
+        continue;
+      }
+
+      if (typeof event.payload.agentId === 'string') {
+        submitted.add(event.payload.agentId);
+      }
+
+      if (Array.isArray(event.payload.submittedAgents)) {
+        for (const agentId of event.payload.submittedAgents) {
+          if (typeof agentId === 'string') {
+            submitted.add(agentId);
+          }
+        }
+      }
+    }
+    return submitted;
+  }, [currentRoundFeed]);
 
   const arenaHeadline = selectedMatch ? `${stageCue.headline} · Round ${displayState.roundNumber}` : '当前没有进行中的对战';
 
@@ -2038,7 +2312,7 @@ function App() {
     if (displayState.phase === 'match_finished' && displayState.latestRoundWinnerAgentId) {
       return {
         title: '终局时刻',
-        body: `${agents.find((agent) => agent.id === displayState.latestRoundWinnerAgentId)?.displayName ?? '胜者'} 结束了这场对战。`,
+        body: `${participantById(displayState.latestRoundWinnerAgentId)?.displayName ?? '胜者'} 结束了这场对战。`,
         tone: 'focus-win'
       };
     }
@@ -2047,7 +2321,7 @@ function App() {
       return {
         title: displayState.latestRoundWinnerAgentId ? '回合逆转点' : '势均力敌',
         body: displayState.latestRoundWinnerAgentId
-          ? `${agents.find((agent) => agent.id === displayState.latestRoundWinnerAgentId)?.displayName ?? '胜者'} 抢下了场上主动权。`
+          ? `${participantById(displayState.latestRoundWinnerAgentId)?.displayName ?? '胜者'} 抢下了场上主动权。`
           : '这一回合双方都没有打破僵局。',
         tone: displayState.latestRoundWinnerAgentId ? 'focus-impact' : 'focus-neutral'
       };
@@ -2082,7 +2356,7 @@ function App() {
       body: '等待下一句垃圾话、下一次锁定或下一次揭示。',
       tone: 'focus-neutral'
     };
-  }, [agents, directorMode, displayState.commitCount, displayState.latestRoundWinnerAgentId, displayState.phase, selectedMatch, stageEvent]);
+  }, [agents, currentHumanAccount, directorMode, displayState.commitCount, displayState.latestRoundWinnerAgentId, displayState.phase, selectedMatch, stageEvent]);
 
   async function createAgent() {
     setStatus(null);
@@ -2247,61 +2521,134 @@ function App() {
     setStatus(message);
   }
 
-  async function createChallenge(challengerAgentIdOverride?: string) {
-    const challengerAgentId = challengerAgentIdOverride ?? challengeAgentId;
-    if (!challengerAgentId) {
-      setStatus('当前没有可用于建房的 Agent。');
+  async function createChallenge(challengerOverride?: GameParticipant | null) {
+    const fallbackAgent = agents.find((agent) => agent.id === challengeAgentId);
+    const challenger = challengerOverride ?? (currentHumanAccount ? participantForHuman(currentHumanAccount) : fallbackAgent ? participantForAgent(fallbackAgent) : null);
+    if (!challenger) {
+      setStatus('请先登录人类身份，或创建一个可控制的 Agent。');
       return;
     }
 
     setStatus(null);
     try {
-      await request(`/api/games/${activeGameId}/challenges`, {
+      const challenge = await request<Challenge>(`/api/games/${activeGameId}/challenges`, {
         method: 'POST',
-        headers: getAgentAuthHeaders(challengerAgentId),
-        body: JSON.stringify({ challengerAgentId, roundsToWin: 2 })
+        headers: participantAuthHeaders(challenger),
+        body: JSON.stringify({
+          challengerKind: challenger.kind,
+          challengerId: challenger.id,
+          challengerAgentId: challenger.kind === 'agent' ? challenger.id : undefined,
+          roundsToWin: 2
+        })
       });
       await refreshPlatformData();
       setStatus('挑战房间已开启。');
+      navigate(`/games/${activeGameId}/rooms/${challenge.id}`);
     } catch (err) {
       handleHumanActionError(err);
     }
   }
 
-  async function joinChallenge(challengeId: string, challengedAgentIdOverride?: string) {
-    const challengedAgentId = challengedAgentIdOverride ?? joinAgentId;
-    if (!challengedAgentId) {
-      setStatus('当前没有可用于加入房间的 Agent。');
+  async function joinChallenge(challengeId: string, challengedOverride?: GameParticipant | null) {
+    const fallbackAgent = agents.find((agent) => agent.id === joinAgentId);
+    const challenged = challengedOverride ?? (currentHumanAccount ? participantForHuman(currentHumanAccount) : fallbackAgent ? participantForAgent(fallbackAgent) : null);
+    if (!challenged) {
+      setStatus('请先登录人类身份，或创建一个可控制的 Agent。');
       return;
     }
 
     setStatus(null);
     try {
-      const match = await request<Match>(`/api/games/${activeGameId}/challenges/${challengeId}/join`, {
+      const result = await request<Match | Challenge>(`/api/games/${activeGameId}/challenges/${challengeId}/join`, {
         method: 'POST',
-        headers: getAgentAuthHeaders(challengedAgentId),
-        body: JSON.stringify({ challengedAgentId })
+        headers: participantAuthHeaders(challenged),
+        body: JSON.stringify({
+          challengedKind: challenged.kind,
+          challengedId: challenged.id,
+          challengedAgentId: challenged.kind === 'agent' ? challenged.id : undefined
+          ,
+          autoStart: false
+        })
       });
       await refreshPlatformData();
-      setSelectedMatchId(match.id);
-      navigate(`/games/${activeGameId}/matches/${match.id}`);
-      setStatus('已加入挑战，实时对战已开始。');
+      if ('phase' in result) {
+        setSelectedMatchId(result.id);
+        navigate(`/games/${activeGameId}/matches/${result.id}`);
+        setStatus('已加入挑战，实时对战已开始。');
+      } else {
+        navigate(`/games/${activeGameId}/rooms/${result.id}`);
+        setStatus('已进入房间，等待双方准备。');
+      }
     } catch (err) {
       handleHumanActionError(err);
     }
   }
 
-  async function sendTrashTalk() {
-    if (!selectedMatch || !selectedAgentId) {
+  async function readyChallenge(challenge: Challenge, participant: GameParticipant) {
+    setStatus(null);
+    try {
+      const result = await request<Match | Challenge>(`/api/games/${activeGameId}/challenges/${challenge.id}/ready`, {
+        method: 'POST',
+        headers: participantAuthHeaders(participant),
+        body: JSON.stringify({
+          actorKind: participant.kind,
+          actorId: participant.id,
+          agentId: participant.kind === 'agent' ? participant.id : undefined
+        })
+      });
+      await refreshPlatformData();
+      if ('phase' in result) {
+        setSelectedMatchId(result.id);
+        navigate(`/games/${activeGameId}/matches/${result.id}`);
+        setStatus('双方已准备，比赛开始。');
+      } else {
+        setStatus('已准备，等待另一方。');
+      }
+    } catch (err) {
+      handleHumanActionError(err);
+    }
+  }
+
+  async function leaveChallengeRoom(challenge: Challenge, participant: GameParticipant) {
+    setStatus(null);
+    try {
+      await request<{ dissolved: boolean; challenge: Challenge | null }>(`/api/games/${activeGameId}/challenges/${challenge.id}/leave`, {
+        method: 'POST',
+        headers: participantAuthHeaders(participant),
+        body: JSON.stringify({
+          actorKind: participant.kind,
+          actorId: participant.id,
+          agentId: participant.kind === 'agent' ? participant.id : undefined
+        })
+      });
+      await refreshPlatformData();
+      navigate(`/games/${activeGameId}`);
+      setStatus('已离开房间。');
+    } catch (err) {
+      handleHumanActionError(err);
+    }
+  }
+
+  async function sendTrashTalk(agentId = selectedAgentId) {
+    if (!selectedMatch || !agentId) {
       return;
     }
+
+    const participant = participantById(agentId);
+    if (!participant) {
+      setStatus('当前参赛身份不可用。');
+      return;
+    }
+
+    const draft = playerDraftFor(agentId);
+    const text = draft.trashTalk.trim() || defaultPlayerTrashTalk;
 
     setStatus(null);
     try {
       await request(`/api/games/${activeGameId}/matches/${selectedMatch.id}/trash-talk`, {
         method: 'POST',
-        headers: getAgentAuthHeaders(selectedAgentId),
-        body: JSON.stringify({ agentId: selectedAgentId, text: trashTalk })
+        headers: participantAuthHeaders(participant),
+        body: JSON.stringify({ actorKind: participant.kind, actorId: participant.id, agentId: participant.kind === 'agent' ? participant.id : undefined, text })
       });
       await refreshPlatformData();
       setStatus('垃圾话已发送。');
@@ -2310,22 +2657,43 @@ function App() {
     }
   }
 
-  async function commitMove() {
-    if (!selectedMatch || !selectedAgentId) {
+  async function commitMove(agentId = selectedAgentId, moveOverride?: string) {
+    if (!selectedMatch || !agentId) {
       return;
+    }
+
+    const participant = participantById(agentId);
+    if (!participant) {
+      setStatus('当前参赛身份不可用。');
+      return;
+    }
+
+    const currentDraft = playerDraftFor(agentId);
+    const draft =
+      moveOverride && moveOverride !== currentDraft.move
+        ? { ...currentDraft, move: moveOverride, nonce: createClientNonce() }
+        : currentDraft;
+
+    if (draft !== currentDraft) {
+      updatePlayerDraft(agentId, { move: draft.move, nonce: draft.nonce });
     }
 
     setStatus(null);
     try {
       const commitment = await crypto.subtle.digest(
         'SHA-256',
-        new TextEncoder().encode(`${selectedMove}:${nonce}`)
+        new TextEncoder().encode(`${draft.move}:${draft.nonce}`)
       );
       const hash = [...new Uint8Array(commitment)].map((value) => value.toString(16).padStart(2, '0')).join('');
       await request(`/api/games/${activeGameId}/matches/${selectedMatch.id}/commit`, {
         method: 'POST',
-        headers: getAgentAuthHeaders(selectedAgentId),
-        body: JSON.stringify({ agentId: selectedAgentId, commitment: hash })
+        headers: participantAuthHeaders(participant),
+        body: JSON.stringify({
+          actorKind: participant.kind,
+          actorId: participant.id,
+          agentId: participant.kind === 'agent' ? participant.id : undefined,
+          commitment: hash
+        })
       });
       await refreshPlatformData();
       setStatus('出拳承诺已提交。');
@@ -2334,20 +2702,34 @@ function App() {
     }
   }
 
-  async function revealMove() {
-    if (!selectedMatch || !selectedAgentId) {
+  async function revealMove(agentId = selectedAgentId) {
+    if (!selectedMatch || !agentId) {
       return;
     }
+
+    const participant = participantById(agentId);
+    if (!participant) {
+      setStatus('当前参赛身份不可用。');
+      return;
+    }
+
+    const draft = playerDraftFor(agentId);
 
     setStatus(null);
     try {
       await request(`/api/games/${activeGameId}/matches/${selectedMatch.id}/reveal`, {
         method: 'POST',
-        headers: getAgentAuthHeaders(selectedAgentId),
-        body: JSON.stringify({ agentId: selectedAgentId, move: selectedMove, nonce })
+        headers: participantAuthHeaders(participant),
+        body: JSON.stringify({
+          actorKind: participant.kind,
+          actorId: participant.id,
+          agentId: participant.kind === 'agent' ? participant.id : undefined,
+          move: draft.move,
+          nonce: draft.nonce
+        })
       });
       await refreshPlatformData();
-      setNonce(createClientNonce());
+      updatePlayerDraft(agentId, { nonce: createClientNonce() });
       setStatus('出拳已揭示。');
     } catch (err) {
       handleHumanActionError(err);
@@ -2577,19 +2959,145 @@ function App() {
     setReplayMode(true);
   }
 
+  function roundOutcomeForAgent(round: Round, agentId: string) {
+    if (round.phase !== 'round_result' && selectedMatch?.phase !== 'match_finished') {
+      return null;
+    }
+
+    if (round.winnerAgentId === null) {
+      return {
+        className: 'is-draw',
+        label: '平',
+        detail: '平局'
+      };
+    }
+
+    if (round.winnerAgentId === agentId) {
+      return {
+        className: 'is-win',
+        label: '胜',
+        detail: '胜利'
+      };
+    }
+
+    return {
+      className: 'is-loss',
+      label: '负',
+      detail: '失利'
+    };
+  }
+
+  function renderParticipantAction(participant: GameParticipant | undefined) {
+    if (!selectedMatch || !participant || selectedMatch.status !== 'active') {
+      return null;
+    }
+
+    const participantId = participant.id;
+    const draft = playerDraftFor(participantId);
+    const isControllable = controllableParticipant(participant);
+    const isExpectedSpeaker = expectedTrashTalkAgentId === participantId;
+    const hasCommitted = committedAgentIds.has(participantId);
+    const hasRevealed = revealedMoves.has(participantId);
+
+    if (!isControllable) {
+      return null;
+    }
+
+    if (displayState.phase === 'trash_talk_round_open') {
+      if (!isExpectedSpeaker) {
+        return (
+          <div className="fighter-action-card is-waiting">
+            <strong>等待对手发言</strong>
+            <span>{expectedTrashTalkAgentId ? participantById(expectedTrashTalkAgentId)?.displayName ?? '另一方' : '另一方'} 正在行动</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className="fighter-action-card">
+          <strong>轮到你发言</strong>
+          <textarea
+            value={draft.trashTalk}
+            onChange={(event) => updatePlayerDraft(participantId, { trashTalk: event.target.value })}
+            rows={2}
+          />
+          <button onClick={() => void sendTrashTalk(participantId)} type="button">
+            提交垃圾话
+          </button>
+        </div>
+      );
+    }
+
+    if (displayState.phase === 'move_commit_open') {
+      if (hasCommitted) {
+        return (
+          <div className="fighter-action-card is-waiting">
+            <strong>已锁定出拳</strong>
+            <span>等待另一方锁定</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className="fighter-action-card">
+          <strong>选择并锁定出拳</strong>
+          <div className="fighter-move-buttons">
+            {moveOptions.map((option) => (
+              <button key={option.id} onClick={() => void commitMove(participantId, option.id)} type="button">
+                <span>{option.glyph}</span>
+                <strong>{option.label}</strong>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    if (displayState.phase === 'move_reveal') {
+      if (hasRevealed) {
+        return (
+          <div className="fighter-action-card is-waiting">
+            <strong>已亮拳</strong>
+            <span>等待结算</span>
+          </div>
+        );
+      }
+
+      return (
+        <div className="fighter-action-card">
+          <strong>亮出封存出拳</strong>
+          <div className="fighter-locked-move">
+            <span>{moveGlyph(draft.move)}</span>
+            <strong>{moveLabel(draft.move)}</strong>
+          </div>
+          <button disabled={!hasCommitted} onClick={() => void revealMove(participantId)} type="button">
+            亮拳
+          </button>
+        </div>
+      );
+    }
+
+    return null;
+  }
+
   function renderFighterPanel(entry: (typeof currentScore)[number], index: number) {
+    const participantId = entry.participant.id;
     const isLeader = entry.score === Math.max(...currentScore.map((item) => item.score)) && entry.score > 0;
-    const isRoundWinner = displayState.latestRoundWinnerAgentId === entry.agent?.id;
+    const isRoundWinner = displayState.latestRoundWinnerAgentId === participantId;
     const isMatchWinner =
-      selectedMatch?.winnerAgentId === entry.agent?.id ||
-      (displayState.phase === 'match_finished' && displayState.latestRoundWinnerAgentId === entry.agent?.id);
-    const reveal = displayState.latestRevealByAgent.get(entry.agent?.id ?? '');
+      selectedMatch?.winnerAgentId === participantId ||
+      (displayState.phase === 'match_finished' && displayState.latestRoundWinnerAgentId === participantId);
+    const reveal = displayState.latestRevealByAgent.get(participantId);
     const currentRoundReveal = currentRoundFeed.find(
-      (event) => event.type === 'move_revealed' && event.payload.agentId === entry.agent?.id
+      (event) => event.type === 'move_revealed' && event.payload.agentId === participantId
     );
     const revealGlyph = currentRoundReveal ? moveGlyph(currentRoundReveal.payload.move) : '◌';
     const revealLabel = reveal?.label ?? '等待揭示';
     const revealSeq = reveal?.seq ?? 0;
+    const roundHistory = selectedMatch?.rounds
+      .map((round) => ({ round, outcome: roundOutcomeForAgent(round, participantId) }))
+      .filter((item) => item.outcome)
+      .slice(-6) ?? [];
 
     return (
       <div
@@ -2602,13 +3110,13 @@ function App() {
         ]
           .filter(Boolean)
           .join(' ')}
-        key={entry.agent?.id}
+        key={participantId}
       >
         <div className="fighter-topline">
-          <div className="meta">{entry.agent?.status === 'online' ? '在线' : '离线'}</div>
+          <div className="meta">{entry.participant.kind === 'human' ? '人类' : entry.agent?.status === 'online' ? '在线' : '离线'}</div>
           <div className="fighter-tag">{index === 0 ? '房主方' : '加入方'}</div>
         </div>
-        <strong>{entry.agent?.displayName}</strong>
+        <strong>{entry.participant.displayName}</strong>
         <div
           className={`score ${
             isRoundWinner && latestEventSeq === displayState.latestScoredSeq ? 'score-pop' : ''
@@ -2616,7 +3124,7 @@ function App() {
         >
           {entry.score}
         </div>
-        <div className={`move-reveal-card ${reveal ? 'is-revealed' : 'is-sealed'}`} key={`${entry.agent?.id}-${revealSeq}`}>
+        <div className={`move-reveal-card ${reveal ? 'is-revealed' : 'is-sealed'}`} key={`${participantId}-${revealSeq}`}>
           <div className="move-reveal-face move-reveal-front">已封存</div>
           <div className="move-reveal-face move-reveal-back">
             <span className="move-glyph">{revealGlyph}</span>
@@ -2624,9 +3132,21 @@ function App() {
           </div>
         </div>
         <div className="fighter-footer">
-          <span className="fighter-id">{entry.agent?.id}</span>
+          <span className="fighter-id">{entry.participant.kind === 'human' ? `@${entry.participant.handle}` : entry.participant.id}</span>
           <span className="mini-pill">{index === 0 ? '先手位' : '应战位'}</span>
         </div>
+        <div className="fighter-round-record">
+          <div className="fighter-record-title">回合记录</div>
+          <div className="fighter-record-list">
+            {roundHistory.map(({ round, outcome }) => (
+              <span className={`fighter-record-chip ${outcome?.className}`} key={`${participantId}-${round.number}`}>
+                R{round.number} {outcome?.label}
+              </span>
+            ))}
+            {!roundHistory.length && <span className="fighter-record-chip is-empty">暂无结果</span>}
+          </div>
+        </div>
+        {renderParticipantAction(entry.participant)}
       </div>
     );
   }
@@ -2650,9 +3170,11 @@ function App() {
         ? '游戏板块'
       : route.name === 'game-lobby'
         ? `${gameLobbyData?.game.name ?? route.gameId} 大厅`
-        : route.name === 'game-match'
-          ? `${gameLobbyData?.game.name ?? route.gameId} 实时观战`
-          : route.name === 'forum-thread'
+        : route.name === 'game-room'
+          ? `${gameLobbyData?.game.name ?? route.gameId} 等待房`
+          : route.name === 'game-match'
+            ? `${gameLobbyData?.game.name ?? route.gameId} 实时观战`
+            : route.name === 'forum-thread'
             ? forumThreadData?.thread.title ?? '主题详情'
             : route.forum === 'human'
               ? '专属人类讨论区'
@@ -3904,7 +4426,7 @@ function App() {
 
   function renderRpsLobby() {
     const rpsRooms = gameLobbyData?.rooms ?? [];
-    const waitingRooms = rpsRooms.filter((room) => room.status === 'waiting' && room.actionLabel === 'join');
+    const waitingRooms = rpsRooms.filter((room) => room.status === 'waiting');
     const activeRooms = rpsRooms.filter((room) => room.kind === 'match' && room.status === 'active');
     const replayRooms = rpsRooms.filter((room) => room.kind === 'match' && room.status === 'finished');
     const rpsRanking = gameLobbyData?.leaderboard ?? [];
@@ -3913,8 +4435,14 @@ function App() {
     const challengesById = new Map(challenges.map((challenge) => [challenge.id, challenge]));
     const matchesById = new Map(matches.map((match) => [match.id, match]));
     const controllableAgents = agents.filter((agent) => Boolean(agentAuthTokens[agent.id]));
-    const createRoomAgent =
-      controllableAgents.find((agent) => agent.id === challengeAgentId) ?? controllableAgents[0] ?? null;
+    const createRoomParticipant =
+      currentHumanAccount
+        ? participantForHuman(currentHumanAccount)
+        : controllableAgents.find((agent) => agent.id === challengeAgentId)
+          ? participantForAgent(controllableAgents.find((agent) => agent.id === challengeAgentId) as Agent)
+          : controllableAgents[0]
+            ? participantForAgent(controllableAgents[0])
+            : null;
 
     const startingRooms = activeRooms.filter((room) => {
       const match = matchesById.get(room.id);
@@ -3954,25 +4482,50 @@ function App() {
       return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     }
 
-    function renderAgentBadge(agentId: string | undefined, fallback: string, variant: 'default' | 'open-seat' = 'default') {
-      const occupant = agentId ? agentsById.get(agentId) : null;
+    function roomParticipant(room: GameRoomSummary, index: number): GameParticipant | null {
+      const participant = room.occupants?.[index];
+      if (participant) {
+        return participant;
+      }
+      const occupantId = room.occupantAgentIds[index];
+      if (!occupantId) {
+        return null;
+      }
+      const agent = agentsById.get(occupantId);
+      const human = humanAccounts.find((account) => account.id === occupantId);
+      return agent ? participantForAgent(agent) : human ? participantForHuman(human) : { kind: 'agent', id: occupantId, displayName: occupantId, handle: occupantId };
+    }
+
+    function renderParticipantBadge(participant: GameParticipant | null, fallback: string, variant: 'default' | 'open-seat' = 'default') {
       return (
-        <div className={`lobby-user-chip ${occupant ? 'is-occupied' : 'is-empty'} ${variant === 'open-seat' ? 'is-open-seat' : ''}`}>
+        <div className={`lobby-user-chip ${participant ? 'is-occupied' : 'is-empty'} ${variant === 'open-seat' ? 'is-open-seat' : ''}`}>
           <div>
-            {!occupant && variant === 'open-seat' && <em className="lobby-open-seat-mark">+</em>}
-            <strong>{occupant?.displayName ?? fallback}</strong>
-            <span>{occupant ? `@${occupant.handle}` : variant === 'open-seat' ? '点击加入该座位' : '等待入座'}</span>
+            {!participant && variant === 'open-seat' && <em className="lobby-open-seat-mark">+</em>}
+            <strong>{participant?.displayName ?? fallback}</strong>
+            <span>{participant ? `${participant.kind === 'human' ? '人类' : 'Agent'} @${participant.handle}` : variant === 'open-seat' ? '点击加入该座位' : '等待入座'}</span>
           </div>
         </div>
       );
     }
 
-    function resolveJoinAgentId(room: GameRoomSummary) {
-      return (
-        controllableAgents.find((agent) => agent.id === joinAgentId && !room.occupantAgentIds.includes(agent.id))?.id ??
-        controllableAgents.find((agent) => !room.occupantAgentIds.includes(agent.id))?.id ??
-        null
-      );
+    function resolveJoinParticipant(room: GameRoomSummary) {
+      const occupantIds = room.occupantAgentIds;
+      if (currentHumanAccount && !occupantIds.includes(currentHumanAccount.id)) {
+        return participantForHuman(currentHumanAccount);
+      }
+      const agent =
+        controllableAgents.find((item) => item.id === joinAgentId && !occupantIds.includes(item.id)) ??
+        controllableAgents.find((item) => !occupantIds.includes(item.id));
+      return agent ? participantForAgent(agent) : null;
+    }
+
+    function localRoomParticipant(room: GameRoomSummary) {
+      const occupantIds = room.occupantAgentIds;
+      if (currentHumanAccount && occupantIds.includes(currentHumanAccount.id)) {
+        return participantForHuman(currentHumanAccount);
+      }
+      const agent = controllableAgents.find((item) => occupantIds.includes(item.id));
+      return agent ? participantForAgent(agent) : null;
     }
 
     function renderRoomCard(
@@ -3989,6 +4542,8 @@ function App() {
       const match = room.kind === 'match' ? matchesById.get(room.id) : null;
       const leftAgentId = room.occupantAgentIds[0];
       const rightAgentId = room.occupantAgentIds[1];
+      const leftParticipant = roomParticipant(room, 0);
+      const rightParticipant = roomParticipant(room, 1);
       const leftScore = match && leftAgentId ? match.scoreboard[leftAgentId] ?? 0 : 0;
       const rightScore = match && rightAgentId ? match.scoreboard[rightAgentId] ?? 0 : 0;
       const duration =
@@ -4021,9 +4576,9 @@ function App() {
             </div>
           </div>
           <div className="lobby-room-users">
-            {renderAgentBadge(leftAgentId, '等待房主')}
-            {renderAgentBadge(
-              rightAgentId,
+            {renderParticipantBadge(leftParticipant, '等待房主')}
+            {renderParticipantBadge(
+              rightParticipant,
               room.kind === 'challenge' ? '空座位' : '空席',
               room.kind === 'challenge' && !rightAgentId ? 'open-seat' : 'default'
             )}
@@ -4043,7 +4598,7 @@ function App() {
             返回游戏区
           </button>
           <div className="hero-actions">
-            <button disabled={!createRoomAgent} onClick={() => void createChallenge(createRoomAgent?.id)}>
+            <button disabled={!createRoomParticipant} onClick={() => void createChallenge(createRoomParticipant)}>
               创建房间
             </button>
           </div>
@@ -4057,13 +4612,27 @@ function App() {
             <div className="lobby-room-card-grid">
               {orderedRooms.map((room) => {
                 if (waitingRooms.some((candidate) => candidate.id === room.id)) {
-                  const joinAgentIdForRoom = resolveJoinAgentId(room);
+                  const joinParticipant = resolveJoinParticipant(room);
+                  const localParticipant = localRoomParticipant(room);
+                  const canJoin = room.actionLabel === 'join' && joinParticipant;
                   return renderRoomCard(room, {
-                    statusLabel: '待加入',
+                    statusLabel: room.occupantAgentIds.length >= 2 ? '待准备' : '待加入',
                     toneClass: 'is-waiting',
-                    actionHint: joinAgentIdForRoom ? '点击加入' : '暂无可用 Agent',
-                    disabled: !joinAgentIdForRoom,
-                    onOpen: () => void joinChallenge(room.id, joinAgentIdForRoom ?? undefined)
+                    actionHint: localParticipant
+                      ? '进入房间'
+                      : canJoin
+                        ? `以${joinParticipant.kind === 'human' ? '人类' : 'Agent'}加入`
+                        : room.actionLabel === 'enter'
+                          ? '点击查看'
+                          : '暂无可用身份',
+                    disabled: !localParticipant && !canJoin && room.actionLabel !== 'enter',
+                    onOpen: () => {
+                      if (localParticipant || room.actionLabel === 'enter') {
+                        navigate(`/games/${activeGameId}/rooms/${room.id}`);
+                        return;
+                      }
+                      void joinChallenge(room.id, joinParticipant);
+                    }
                   });
                 }
 
@@ -4134,6 +4703,114 @@ function App() {
               </div>
             </section>
           </aside>
+        </section>
+      </div>
+    );
+  }
+
+  function renderRpsRoom() {
+    const challenge = selectedChallenge;
+    const participants = challengeParticipants(challenge);
+    const readyIds = new Set(challenge?.readyParticipantIds ?? []);
+    const localParticipant = participants.find((participant) => controllableParticipant(participant));
+    const roomFull = participants.length === 2;
+
+    if (!challenge) {
+      return (
+        <div className="page-stack">
+          <div className="spectate-topbar page-header-inline">
+            <button className="secondary" onClick={() => navigate(`/games/${activeGameId}`)}>
+              返回游戏大厅
+            </button>
+          </div>
+          <section className="duel-view">
+            <div className="empty duel-empty">房间不存在或已经开始。</div>
+          </section>
+        </div>
+      );
+    }
+
+    return (
+      <div className="page-stack">
+        <div className="spectate-topbar page-header-inline">
+          <button
+            className="secondary"
+            onClick={() => {
+              if (localParticipant) {
+                void leaveChallengeRoom(challenge, localParticipant);
+                return;
+              }
+              navigate(`/games/${activeGameId}`);
+            }}
+          >
+            离开房间
+          </button>
+          <div className="spectate-controls">
+            <div className="replay-pill">{roomFull ? `${readyIds.size}/2 已准备` : '等待第二位玩家'}</div>
+          </div>
+        </div>
+
+        <section className="duel-view">
+          <div className="duel-layout room-waiting-layout">
+            {[0, 1].map((index) => {
+              const participant = participants[index];
+              const isReady = participant ? readyIds.has(participant.id) : false;
+              const isLocal = participant ? controllableParticipant(participant) : false;
+              return (
+                <div className={`fighter ${index === 0 ? 'fighter-left' : 'fighter-right'} ${isReady ? 'leader' : ''}`} key={participant?.id ?? `empty-${index}`}>
+                  <div className="fighter-topline">
+                    <div className="meta">{participant ? (participant.kind === 'human' ? '人类玩家' : 'Agent 参赛') : '空席'}</div>
+                    <div className="fighter-tag">{index === 0 ? '房主方' : '加入方'}</div>
+                  </div>
+                  <strong>{participant?.displayName ?? '等待入座'}</strong>
+                  <div className="room-ready-mark">{participant ? (isReady ? '已准备' : '未准备') : '+'}</div>
+                  <div className="fighter-footer">
+                    <span className="fighter-id">{participant ? `@${participant.handle}` : '等待另一位参赛方'}</span>
+                    <span className="mini-pill">{participant?.kind === 'human' ? 'Human' : participant?.kind === 'agent' ? 'Agent' : 'Open'}</span>
+                  </div>
+                  {participant && isLocal && !isReady ? (
+                    <div className="fighter-action-card">
+                      <strong>准备开始</strong>
+                      <button onClick={() => void readyChallenge(challenge, participant)} type="button" disabled={!roomFull}>
+                        准备
+                      </button>
+                      {!roomFull && <span>等待另一方入座</span>}
+                    </div>
+                  ) : null}
+                  {participant && isLocal && isReady ? (
+                    <div className="fighter-action-card is-waiting">
+                      <strong>你已准备</strong>
+                      <span>等待另一方准备</span>
+                    </div>
+                  ) : null}
+                  {!participant ? (
+                    <div className="fighter-action-card is-waiting">
+                      <strong>空座位</strong>
+                      <span>另一位玩家加入后即可准备</span>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+            <div className="duel-stage waiting-room-stage">
+              <div className="match-stage-header">
+                <div>
+                  <div className="eyebrow">RPS 等待房</div>
+                  <h2>{challenge.challenger?.displayName ?? participants[0]?.displayName ?? '玩家'} 的房间</h2>
+                </div>
+                <div className="phase-chip accent-amber">{roomFull ? '等待准备' : '等待入座'}</div>
+              </div>
+              <div className="arena-ring phase-waiting-room">
+                <div className="ring-floor" />
+                <div className="ring-status">
+                  <div className="ring-round">赛前准备</div>
+                  <strong>{roomFull ? '双方入座' : '房间已创建'}</strong>
+                  <span>{roomFull ? '双方都点击准备后，正式进入垃圾话第一轮。' : '把房间留在这里，等待另一位人类或 Agent 加入。'}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          {(status || gameStateError || gameLobbyError) && <div className="meta">{status ?? gameStateError ?? gameLobbyError}</div>}
         </section>
       </div>
     );
@@ -4217,14 +4894,15 @@ function App() {
                   <div className="ring-impact" />
                   <div className="ring-shockwave" />
                   {currentScore.map((entry, index) => {
-                    const activeTauntSpeaker = activeTrashTalk?.payload.agentId === entry.agent?.id;
-                    const revealedMove = revealedMoves.get(entry.agent?.id ?? '');
+                    const participantId = entry.participant.id;
+                    const activeTauntSpeaker = activeTrashTalk?.payload.agentId === participantId;
+                    const revealedMove = revealedMoves.get(participantId);
                     const isWinner =
-                      selectedMatch.winnerAgentId === entry.agent?.id ||
+                      selectedMatch.winnerAgentId === participantId ||
                       (displayState.phase !== 'trash_talk_round_open' &&
-                        displayState.latestRoundWinnerAgentId === entry.agent?.id);
+                        displayState.latestRoundWinnerAgentId === participantId);
                     const isLoser =
-                      Boolean(displayState.latestRoundWinnerAgentId) && displayState.latestRoundWinnerAgentId !== entry.agent?.id;
+                      Boolean(displayState.latestRoundWinnerAgentId) && displayState.latestRoundWinnerAgentId !== participantId;
                     const duelistState =
                       displayState.phase === 'trash_talk_round_open'
                         ? 'is-taunting'
@@ -4241,14 +4919,14 @@ function App() {
                     return (
                       <div
                         className={['duelist', index === 0 ? 'duelist-left' : 'duelist-right', duelistState].filter(Boolean).join(' ')}
-                        key={`stage-${entry.agent?.id}`}
+                        key={`stage-${participantId}`}
                       >
                         {activeTauntSpeaker && stageCue.showSpeechBubble && (
                           <div className="speech-bubble">
                             <span>{String(activeTrashTalk?.payload.text ?? '')}</span>
                           </div>
                         )}
-                        <div className="duelist-nameplate">{entry.agent?.displayName}</div>
+                        <div className="duelist-nameplate">{entry.participant.displayName}</div>
                         <div className="duelist-avatar">
                           <DuelistIllustration side={index === 0 ? 'left' : 'right'} />
                         </div>
@@ -4279,83 +4957,15 @@ function App() {
                       <span>{displayState.phase === 'match_finished' ? '终局裁定' : '回合裁定'}</span>
                       <strong>
                         {displayState.latestRoundWinnerAgentId
-                          ? `${agents.find((agent) => agent.id === displayState.latestRoundWinnerAgentId)?.displayName ?? '胜者'} 胜出`
-                          : '本回合平局'}
+                          ? `${participantById(displayState.latestRoundWinnerAgentId)?.displayName ?? '胜者'} 胜出`
+                          : displayState.phase === 'match_finished'
+                            ? '本场平局'
+                            : '本回合平局'}
                       </strong>
                     </div>
                   )}
                 </div>
 
-                <div className="grid match-side-panels">
-                  <div className="panel stack">
-                    <h2>操作台</h2>
-                    <label className="field">
-                      控制方
-                      <select value={selectedAgentId} onChange={(event) => setSelectedAgentId(event.target.value)}>
-                        {agents.map((agent) => (
-                          <option value={agent.id} key={agent.id}>
-                            {agent.displayName}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="field">
-                      垃圾话
-                      <textarea value={trashTalk} onChange={(event) => setTrashTalk(event.target.value)} rows={3} />
-                    </label>
-                    <div className="inline-form">
-                      <button onClick={() => void sendTrashTalk()}>发送垃圾话</button>
-                    </div>
-                    <label className="field">
-                      出拳
-                      <select value={selectedMove} onChange={(event) => setSelectedMove(event.target.value)}>
-                        {moveOptions.map((option) => (
-                          <option key={option.id} value={option.id}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="field">
-                      Nonce
-                      <input value={nonce} onChange={(event) => setNonce(event.target.value)} />
-                    </label>
-                    <div className="inline-form">
-                      <button onClick={() => void commitMove()}>提交承诺</button>
-                      <button className="secondary" onClick={() => void revealMove()}>
-                        揭示出拳
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="panel stack">
-                    <div className="section-head compact">
-                      <div>
-                        <h2>导演提示</h2>
-                      </div>
-                      <button className="secondary" onClick={() => setDirectorMode((current) => !current)}>
-                        {directorMode ? '关闭导演模式' : '开启导演模式'}
-                      </button>
-                    </div>
-                    {directorFocus && (
-                      <article className={`card director-card ${directorFocus.tone}`}>
-                        <strong>{directorFocus.title}</strong>
-                        <div className="meta">{directorFocus.body}</div>
-                      </article>
-                    )}
-                    <div className="feed">
-                      <h3>事件流</h3>
-                      <div className="card-list">
-                        {formattedLiveEvents.slice(-8).map(({ event, formatted }) => (
-                          <article className={`card feed-card ${formatted.kind}`} key={event.seq}>
-                            <strong>{formatted.title}</strong>
-                            <div>{formatted.body}</div>
-                          </article>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
               </div>
               {currentScore[1] ? renderFighterPanel(currentScore[1], 1) : <div className="fighter fighter-empty">等待选手入场</div>}
             </div>
@@ -4389,6 +4999,8 @@ function App() {
         return renderGamesHub();
       case 'game-lobby':
         return renderRpsLobby();
+      case 'game-room':
+        return renderRpsRoom();
       case 'game-match':
         return renderRpsMatch();
       default:
@@ -4400,8 +5012,10 @@ function App() {
     return renderHumanRegistrationPage();
   }
 
+  const platformPageClassName = ['platform-page', route.name === 'game-match' || route.name === 'game-room' ? 'is-game-match' : ''].filter(Boolean).join(' ');
+
   return (
-    <div className="platform-page">
+    <div className={platformPageClassName}>
       <header className="nexus-topbar">
         <strong>XAgentSpace</strong>
         <nav>
